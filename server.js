@@ -14,6 +14,33 @@ const pool = new Pool({
   database: process.env.DB_NAME,
 });
 
+// Auto-inicializacion del esquema
+async function initSchema() {
+  const query = `
+    CREATE TABLE IF NOT EXISTS registros_raw (
+      hash_largo VARCHAR(255) PRIMARY KEY,
+      hash_corto VARCHAR(20),
+      grupo_raw VARCHAR(100),
+      usuario_raw VARCHAR(100),
+      nombre_push VARCHAR(150),
+      caption TEXT,
+      conteo INT DEFAULT 1,
+      grupo_raw_2 VARCHAR(100),
+      usuario_raw_2 VARCHAR(100),
+      url_imagen TEXT,
+      timestamp_msg BIGINT,
+      estado VARCHAR(50) DEFAULT 'PROCESADO'
+    );
+    CREATE INDEX IF NOT EXISTS idx_raw_hash ON registros_raw(hash_corto);
+  `;
+  try {
+    await pool.query(query);
+    console.log('[escritorAtom] Esquema verificado/creado');
+  } catch (err) {
+    console.error('[escritorAtom] Error al inicializar esquema:', err.message);
+  }
+}
+
 app.post('/api/v1/raw/escribir-completo', async (req, res) => {
   const {
     hash_corto,
@@ -23,7 +50,7 @@ app.post('/api/v1/raw/escribir-completo', async (req, res) => {
     nombre_push,
     caption,
     timestamp_msg,
-    imagen_base64 // El archivo viene directo en la petición
+    imagen_base64
   } = req.body;
 
   if (!hash_largo || !hash_corto) {
@@ -33,7 +60,6 @@ app.post('/api/v1/raw/escribir-completo', async (req, res) => {
   try {
     let urlR2 = null;
 
-    // 1. Guardar la imagen en Storage (R2/S3) si viene en el payload
     if (imagen_base64) {
       const bufferImagen = Buffer.from(imagen_base64, 'base64');
       const form = new FormData();
@@ -46,7 +72,6 @@ app.post('/api/v1/raw/escribir-completo', async (req, res) => {
       urlR2 = `https://pub-49b9c87f6e6a418ba42de5ba36ddc73e.r2.dev/${hash_corto}.jpg`;
     }
 
-    // 2. Transacción Atómica en PostgreSQL
     const queryUpsert = `
       INSERT INTO registros_raw (
         hash_corto, hash_largo, grupo_raw, usuario_raw, nombre_push, 
@@ -76,9 +101,13 @@ app.post('/api/v1/raw/escribir-completo', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('[ESCRITOR ERROR ATÓMICO]', error.message);
-    return res.status(500).json({ success: false, error: 'Fallo al guardar registro e imagen' });
+    console.error('[escritorAtom ERROR]', error.message);
+    return res.status(500).json({ success: false, error: 'Fallo al procesar persistencia' });
   }
 });
 
-app.listen(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  initSchema();
+  console.log(`[escritorAtom] Servicio escuchando en puerto ${PORT}`);
+});
