@@ -40,7 +40,9 @@ async function initSchema() {
     console.error('[escritorAtom] Error al inicializar esquema:', err.message);
   }
 }
-
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'ok', service: 'escritorAtom' });
+});
 app.post('/api/v1/raw/escribir-completo', async (req, res) => {
   const {
     hash_corto,
