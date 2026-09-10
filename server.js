@@ -7,14 +7,14 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 
 const pool = new Pool({
-  host: process.env.DB_HOST,
+  host: process.env.DB_HOST || '127.0.0.1',
   port: process.env.DB_PORT || 5432,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
 });
 
-// Auto-inicializacion del esquema
+// Auto-inicialización del esquema de base de datos
 async function initSchema() {
   const query = `
     CREATE TABLE IF NOT EXISTS registros_raw (
@@ -35,14 +35,18 @@ async function initSchema() {
   `;
   try {
     await pool.query(query);
-    console.log('[escritorAtom] Esquema verificado/creado');
+    console.log('[escritorAtom] Esquema verificado/creado exitosamente.');
   } catch (err) {
     console.error('[escritorAtom] Error al inicializar esquema:', err.message);
   }
 }
+
+// Health Check para EasyPanel (Resuelve fallos de comprobación)
 app.get('/', (req, res) => {
   res.status(200).json({ status: 'ok', service: 'escritorAtom' });
 });
+
+// Endpoint Atómico: Carga de Imagen a R2 + Persistencia PostgreSQL
 app.post('/api/v1/raw/escribir-completo', async (req, res) => {
   const {
     hash_corto,
@@ -62,18 +66,21 @@ app.post('/api/v1/raw/escribir-completo', async (req, res) => {
   try {
     let urlR2 = null;
 
+    // 1. Carga de la imagen al Storage (R2)
     if (imagen_base64) {
       const bufferImagen = Buffer.from(imagen_base64, 'base64');
       const form = new FormData();
       form.append('file', bufferImagen, `${hash_corto}.jpg`);
 
       await axios.post('https://api.jairokov.com/upload', form, {
-        headers: { ...form.getHeaders() }
+        headers: { ...form.getHeaders() },
+        timeout: 10000 // Maximo 10 segundos de espera
       });
 
       urlR2 = `https://pub-49b9c87f6e6a418ba42de5ba36ddc73e.r2.dev/${hash_corto}.jpg`;
     }
 
+    // 2. Transacción UPSERT en PostgreSQL
     const queryUpsert = `
       INSERT INTO registros_raw (
         hash_corto, hash_largo, grupo_raw, usuario_raw, nombre_push, 
@@ -103,8 +110,13 @@ app.post('/api/v1/raw/escribir-completo', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('[escritorAtom ERROR]', error.message);
-    return res.status(500).json({ success: false, error: 'Fallo al procesar persistencia' });
+    const detalleError = error.response?.data || error.message;
+    console.error('[escritorAtom ERROR]', detalleError);
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Fallo al procesar persistencia', 
+      detalle: detalleError 
+    });
   }
 });
 
