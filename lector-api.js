@@ -65,7 +65,7 @@ async function extraerYEncolar() {
         // 3. Descargar imagen desde R2
         const res = await axios.get(item.url_imagen, {
           responseType: 'arraybuffer',
-          timeout: 10000
+          timeout: 4000
         });
 
         const imageBase64 = Buffer.from(res.data).toString('base64');
