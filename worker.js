@@ -1,3 +1,4 @@
+console.log('[Worker Init] EVOLUTION_URL configurada como:', process.env.EVOLUTION_URL);
 const { Worker } = require('bullmq');
 const Redis = require('ioredis');
 const { Pool } = require('pg');
