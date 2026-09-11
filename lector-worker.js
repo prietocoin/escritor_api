@@ -57,9 +57,9 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
   try {
     // Configuración del modelo Gemini con salida JSON forzada
     const model = genAI.getGenerativeModel({ 
-      model: 'gemini-2.0-flash',
-      generationConfig: { responseMimeType: 'application/json' }
-    });
+  model: 'gemini-3.5-flash-lite',
+  generationConfig: { responseMimeType: 'application/json' }
+});
 
     const imagePart = {
       inlineData: {
