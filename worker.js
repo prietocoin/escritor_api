@@ -4,22 +4,22 @@ const { Pool } = require('pg');
 const axios = require('axios');
 const FormData = require('form-data');
 
-// 1. Configuración con fallbacks
+// 1. Configuración de Variables Globales
 const RAW_EVO_URL = process.env.EVOLUTION_URL || 'https://evo.jairokov.com';
-// Acepta cualquier formato de nombre que hayas puesto en EasyPanel
+const EVOLUTION_URL = RAW_EVO_URL.replace(/\/$/, '');
+
+// Detecta automáticamente cualquier variante de nombre ingresada en EasyPanel
 const EVOLUTION_APIKEY = 
   process.env.EVOLUTION_APIKEY || 
   process.env.EVOLUTION_API_KEY || 
   process.env.API_KEY || 
   process.env.AUTHENTICATION_API_KEY || 
   '';
-// Si EasyPanel no te toma la variable, reemplaza '' con tu clave real entre comillas
-const EVOLUTION_APIKEY = process.env.EVOLUTION_APIKEY || ''; 
 
 console.log(`[Worker Init] Target URL: ${EVOLUTION_URL}`);
 console.log(`[Worker Init] APIKey detectada: ${EVOLUTION_APIKEY ? 'SI (Cargada)' : 'NO (Vacía)'}`);
 
-// 2. Conexiones a PostgreSQL y Redis
+// 2. Conexión a PostgreSQL
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT || 5432,
@@ -28,6 +28,7 @@ const pool = new Pool({
   database: process.env.DB_NAME,
 });
 
+// 3. Conexión a Redis
 const connection = new Redis({
   host: process.env.REDIS_HOST,
   port: process.env.REDIS_PORT || 6379,
@@ -35,7 +36,7 @@ const connection = new Redis({
   maxRetriesPerRequest: null,
 });
 
-// 3. Procesador principal
+// 4. Worker Procesador
 const worker = new Worker('cola-escritor-atom', async (job) => {
   const {
     hash_corto, hash_largo, grupo_raw, usuario_raw,
@@ -44,13 +45,13 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
 
   let urlR2 = null;
 
-  // Descargar e insertar imagen si es_imagen es verdadero
+  // Procesamiento de Imagen (si aplica)
   if (es_imagen) {
     try {
       const targetInstance = (instance || 'default').trim();
       const endpoint = `${EVOLUTION_URL}/chat/getBase64FromMediaMessage/${targetInstance}`;
 
-      console.log(`[Worker] Solicitando media para ${hash_corto} (Instancia: ${targetInstance})`);
+      console.log(`[Worker Media] Solicitando imagen para ${hash_corto} (Instancia: ${targetInstance})`);
 
       const resMedia = await axios.post(
         endpoint,
@@ -82,7 +83,7 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
         urlR2 = `https://pub-49b9c87f6e6a418ba42de5ba36ddc73e.r2.dev/${hash_corto}.jpg`;
         console.log(`[Worker Media OK] Subida a R2 exitosa: ${urlR2}`);
       } else {
-        console.warn(`[Worker Media Warning] Evolution no devolvió un base64 válido para ${hash_corto}`);
+        console.warn(`[Worker Media Warning] Base64 vacío o inválido para ${hash_corto}`);
       }
     } catch (err) {
       console.error(`[Worker Media Error ${hash_corto}]`, {
@@ -93,7 +94,7 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
     }
   }
 
-  // Inserción / Actualización en PostgreSQL
+  // 5. Inserción / Actualización en PostgreSQL (UPSERT)
   const queryUpsert = `
     INSERT INTO registros_raw (
       hash_corto, hash_largo, grupo_raw, usuario_raw, nombre_push,
@@ -117,7 +118,7 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
   return result.rows[0];
 }, { connection });
 
-// Manejadores de errores de sistema
+// 6. Manejo de Errores Globales
 worker.on('failed', (job, err) => {
   console.error(`[Worker Job Error] Tarea ${job?.data?.hash_corto} falló:`, err.message);
 });
