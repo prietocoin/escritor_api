@@ -24,35 +24,27 @@ const colaIA = new Queue('cola-analisis-ia', { connection });
 let estaProcesando = false;
 
 async function extraerYEncolar() {
-  if (estaProcesando) {
-    console.log('[Lector API] Omite ciclo: el proceso anterior aún sigue activo.');
-    return;
-  }
+  if (estaProcesando) return;
 
   estaProcesando = true;
   const client = await pool.connect();
 
   try {
-    // 1. Caducar registros huérfanos con casteo seguro ::bigint
+    // 1. Marcar como CADUCADO solo lo que tenga más de 24 horas en PENDIENTE
     await client.query(`
       UPDATE registros_raw
       SET estado = 'CADUCADO'
-      WHERE conteo = 1
-        AND timestamp_msg::bigint < (EXTRACT(EPOCH FROM NOW()) - 86400)
-        AND (estado IS NULL OR estado = 'PENDIENTE');
+      WHERE timestamp_msg::bigint < (EXTRACT(EPOCH FROM NOW()) - 86400)
+        AND estado = 'PENDIENTE';
     `);
 
-    // 2. Leer registros pendientes
+    // 2. Leer registros PENDIENTES sin filtros restrictivos
     const { rows: cola } = await client.query(`
-      SELECT c.hash_largo, c.url_imagen
-      FROM registros_raw c
-      LEFT JOIN comprobantes_fb f ON c.hash_largo = f.hash_largo
-      WHERE f.hash_largo IS NULL 
-        AND c.url_imagen IS NOT NULL 
-        AND c.url_imagen LIKE 'http%'
-        AND c.conteo > 1
-        AND c.timestamp_msg::bigint >= (EXTRACT(EPOCH FROM NOW()) - 86400)
-        AND (c.estado IS NULL OR c.estado = 'PENDIENTE')
+      SELECT hash_largo, url_imagen
+      FROM registros_raw
+      WHERE estado = 'PENDIENTE'
+        AND url_imagen IS NOT NULL 
+        AND url_imagen LIKE 'http%'
       LIMIT 10;
     `);
 
@@ -62,16 +54,16 @@ async function extraerYEncolar() {
 
     for (const item of cola) {
       try {
-        // 3. Descargar imagen desde R2
+        // 3. Descargar imagen desde Cloudflare R2
         const res = await axios.get(item.url_imagen, {
           responseType: 'arraybuffer',
-          timeout: 4000
+          timeout: 5000
         });
 
         const imageBase64 = Buffer.from(res.data).toString('base64');
         const mimeType = res.headers['content-type'] || 'image/jpeg';
 
-        // 4. Publicar la tarea en la cola de Redis
+        // 4. Publicar la tarea en Redis para el worker de Gemini
         await colaIA.add('analizar-comprobante', {
           hash_largo: item.hash_largo,
           url_imagen: item.url_imagen,
@@ -82,7 +74,7 @@ async function extraerYEncolar() {
           removeOnFail: 100
         });
 
-        // 5. Marcar como EN_COLA para liberar la consulta de lectura
+        // 5. Marcar como EN_COLA para liberar el escáner
         await client.query(`UPDATE registros_raw SET estado = 'EN_COLA' WHERE hash_largo = $1`, [item.hash_largo]);
         console.log(`[Lector API OK] Encolado correctamente: ${item.hash_largo}`);
 
@@ -100,7 +92,7 @@ async function extraerYEncolar() {
   }
 }
 
-// Programación de ciclo
-setInterval(extraerYEncolar, 5 * 1000);
+// Ejecutar ciclo cada 5 segundos
+setInterval(extraerYEncolar, 5000);
 extraerYEncolar();
 console.log('[Lector API Service] Escaneando PostgreSQL y encolando en Redis...');
