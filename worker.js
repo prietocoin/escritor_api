@@ -4,12 +4,16 @@ const { Pool } = require('pg');
 const axios = require('axios');
 const FormData = require('form-data');
 
-// Verificación de inicio
-const rawEvoUrl = process.env.EVOLUTION_URL || 'https://evo.jairokov.com';
-const evolutionUrl = rawEvoUrl.replace(/\/$/, ''); // Quita barra final si existe
-console.log('[Worker Init] EVOLUTION_URL configurada como:', evolutionUrl);
+// 1. Configuración con fallbacks
+const RAW_EVO_URL = process.env.EVOLUTION_URL || 'https://evo.jairokov.com';
+const EVOLUTION_URL = RAW_EVO_URL.replace(/\/$/, '');
+// Si EasyPanel no te toma la variable, reemplaza '' con tu clave real entre comillas
+const EVOLUTION_APIKEY = process.env.EVOLUTION_APIKEY || ''; 
 
-// Conexión a PostgreSQL
+console.log(`[Worker Init] Target URL: ${EVOLUTION_URL}`);
+console.log(`[Worker Init] APIKey detectada: ${EVOLUTION_APIKEY ? 'SI (Cargada)' : 'NO (Vacía)'}`);
+
+// 2. Conexiones a PostgreSQL y Redis
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: process.env.DB_PORT || 5432,
@@ -18,7 +22,6 @@ const pool = new Pool({
   database: process.env.DB_NAME,
 });
 
-// Conexión a Redis
 const connection = new Redis({
   host: process.env.REDIS_HOST,
   port: process.env.REDIS_PORT || 6379,
@@ -26,7 +29,7 @@ const connection = new Redis({
   maxRetriesPerRequest: null,
 });
 
-// Worker procesador
+// 3. Procesador principal
 const worker = new Worker('cola-escritor-atom', async (job) => {
   const {
     hash_corto, hash_largo, grupo_raw, usuario_raw,
@@ -35,21 +38,26 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
 
   let urlR2 = null;
 
-  // Descarga e inserción de imagen
+  // Descargar e insertar imagen si es_imagen es verdadero
   if (es_imagen) {
     try {
-      const evolutionApiKey = process.env.EVOLUTION_APIKEY;
-      const targetInstance = instance || 'default';
+      const targetInstance = (instance || 'default').trim();
+      const endpoint = `${EVOLUTION_URL}/chat/getBase64FromMediaMessage/${targetInstance}`;
+
+      console.log(`[Worker] Solicitando media para ${hash_corto} (Instancia: ${targetInstance})`);
 
       const resMedia = await axios.post(
-        `${evolutionUrl}/chat/getBase64FromMediaMessage/${targetInstance}`,
+        endpoint,
         {
           message: { key: { id: hash_largo } },
           convertToMp4: false
         },
         {
-          headers: { 'apikey': evolutionApiKey },
-          timeout: 10000
+          headers: {
+            'apikey': EVOLUTION_APIKEY,
+            'apiKey': EVOLUTION_APIKEY
+          },
+          timeout: 15000
         }
       );
 
@@ -62,13 +70,20 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
 
         await axios.post('https://api.jairokov.com/upload', form, {
           headers: { ...form.getHeaders() },
-          timeout: 10000
+          timeout: 15000
         });
 
         urlR2 = `https://pub-49b9c87f6e6a418ba42de5ba36ddc73e.r2.dev/${hash_corto}.jpg`;
+        console.log(`[Worker Media OK] Subida a R2 exitosa: ${urlR2}`);
+      } else {
+        console.warn(`[Worker Media Warning] Evolution no devolvió un base64 válido para ${hash_corto}`);
       }
     } catch (err) {
-      console.warn(`[Worker Warning] Error media ${hash_corto}:`, err.message);
+      console.error(`[Worker Media Error ${hash_corto}]`, {
+        status: err.response?.status,
+        detalle: err.response?.data || err.message,
+        url_intentada: err.config?.url
+      });
     }
   }
 
@@ -91,13 +106,14 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
 
   const values = [hash_corto, hash_largo, grupo_raw, usuario_raw, nombre_push, caption, timestamp_msg, urlR2];
   const result = await pool.query(queryUpsert, values);
-  console.log(`[Worker] Procesado: ${hash_corto} | Es nuevo: ${result.rows[0].es_nuevo}`);
+
+  console.log(`[Worker DB OK] Procesado: ${hash_corto} | Es nuevo: ${result.rows[0].es_nuevo}`);
   return result.rows[0];
 }, { connection });
 
-// Captura global de errores de ejecución
+// Manejadores de errores de sistema
 worker.on('failed', (job, err) => {
-  console.error(`[Worker Error] Tarea ${job?.data?.hash_corto} falló:`, err.message);
+  console.error(`[Worker Job Error] Tarea ${job?.data?.hash_corto} falló:`, err.message);
 });
 
 worker.on('error', (err) => {
