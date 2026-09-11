@@ -116,7 +116,7 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
     console.log(`[Lector Worker Descarte] Marcado como no válido: ${hash_largo}`);
   }
 
-}, { connection, concurrency: 2 });
+}, { connection, concurrency: 5 });
 
 worker.on('failed', async (job, err) => {
   console.error(`[Lector Worker Error] Tarea ${job?.data?.hash_largo} falló:`, err.message);
