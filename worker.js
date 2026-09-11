@@ -1,9 +1,13 @@
-console.log('[Worker Init] EVOLUTION_URL configurada como:', process.env.EVOLUTION_URL);
 const { Worker } = require('bullmq');
 const Redis = require('ioredis');
 const { Pool } = require('pg');
 const axios = require('axios');
 const FormData = require('form-data');
+
+// Verificación de inicio
+const rawEvoUrl = process.env.EVOLUTION_URL || 'https://evo.jairokov.com';
+const evolutionUrl = rawEvoUrl.replace(/\/$/, ''); // Quita barra final si existe
+console.log('[Worker Init] EVOLUTION_URL configurada como:', evolutionUrl);
 
 // Conexión a PostgreSQL
 const pool = new Pool({
@@ -31,22 +35,28 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
 
   let urlR2 = null;
 
-  // Descarga de imagen si aplica
+  // Descarga e inserción de imagen
   if (es_imagen) {
     try {
-      const evolutionUrl = process.env.EVOLUTION_URL;
       const evolutionApiKey = process.env.EVOLUTION_APIKEY;
+      const targetInstance = instance || 'default';
 
-      const resMedia = await axios.post(`${evolutionUrl}/chat/getBase64FromMediaMessage/${instance}`, {
-        message: { key: { id: hash_largo } },
-        convertToMp4: false
-      }, {
-        headers: { 'apikey': evolutionApiKey },
-        timeout: 10000
-      });
+      const resMedia = await axios.post(
+        `${evolutionUrl}/chat/getBase64FromMediaMessage/${targetInstance}`,
+        {
+          message: { key: { id: hash_largo } },
+          convertToMp4: false
+        },
+        {
+          headers: { 'apikey': evolutionApiKey },
+          timeout: 10000
+        }
+      );
 
-      if (resMedia.data?.base64) {
-        const bufferImagen = Buffer.from(resMedia.data.base64, 'base64');
+      const base64Data = resMedia.data?.base64 || resMedia.data?.mediaBase64;
+
+      if (typeof base64Data === 'string' && base64Data.length > 0) {
+        const bufferImagen = Buffer.from(base64Data, 'base64');
         const form = new FormData();
         form.append('file', bufferImagen, `${hash_corto}.jpg`);
 
@@ -58,7 +68,7 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
         urlR2 = `https://pub-49b9c87f6e6a418ba42de5ba36ddc73e.r2.dev/${hash_corto}.jpg`;
       }
     } catch (err) {
-      console.error(`[Worker Warning] Error media ${hash_corto}:`, err.message);
+      console.warn(`[Worker Warning] Error media ${hash_corto}:`, err.message);
     }
   }
 
@@ -84,5 +94,14 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
   console.log(`[Worker] Procesado: ${hash_corto} | Es nuevo: ${result.rows[0].es_nuevo}`);
   return result.rows[0];
 }, { connection });
+
+// Captura global de errores de ejecución
+worker.on('failed', (job, err) => {
+  console.error(`[Worker Error] Tarea ${job?.data?.hash_corto} falló:`, err.message);
+});
+
+worker.on('error', (err) => {
+  console.error('[Worker Fatal Error]', err.message);
+});
 
 console.log('[escritor-worker] Escuchando la cola de Redis...');
