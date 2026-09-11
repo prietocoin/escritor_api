@@ -6,7 +6,13 @@ const FormData = require('form-data');
 
 // 1. Configuración con fallbacks
 const RAW_EVO_URL = process.env.EVOLUTION_URL || 'https://evo.jairokov.com';
-const EVOLUTION_URL = RAW_EVO_URL.replace(/\/$/, '');
+// Acepta cualquier formato de nombre que hayas puesto en EasyPanel
+const EVOLUTION_APIKEY = 
+  process.env.EVOLUTION_APIKEY || 
+  process.env.EVOLUTION_API_KEY || 
+  process.env.API_KEY || 
+  process.env.AUTHENTICATION_API_KEY || 
+  '';
 // Si EasyPanel no te toma la variable, reemplaza '' con tu clave real entre comillas
 const EVOLUTION_APIKEY = process.env.EVOLUTION_APIKEY || ''; 
 
