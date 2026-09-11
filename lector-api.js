@@ -101,6 +101,6 @@ async function extraerYEncolar() {
 }
 
 // Programación de ciclo
-setInterval(extraerYEncolar, 2 * 60 * 1000);
+setInterval(extraerYEncolar, 5 * 1000);
 extraerYEncolar();
 console.log('[Lector API Service] Escaneando PostgreSQL y encolando en Redis...');
