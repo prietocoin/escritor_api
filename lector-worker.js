@@ -3,6 +3,10 @@ const Redis = require('ioredis');
 const { Pool } = require('pg');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
+// Definir la tabla destino (Protege tu producción)
+// Si no existe la variable en EasyPanel, usa la de pruebas por defecto.
+const TABLA_DESTINO = process.env.TARGET_TABLE || 'comprobantes_test';
+
 // Conexiones
 const pool = new Pool({
   host: process.env.DB_HOST,
@@ -64,7 +68,8 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
   console.log(`[Lector Worker] Procesando IA para: ${hash_largo}`);
 
   const ai = obtenerClienteGemini();
-  const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
+  // OJO: Verifica si es 1.5 o 2.5 según lo que tengas en Google AI Studio
+  const model = ai.getGenerativeModel({ model: 'gemini-1.5-flash' }); 
 
   const imagePart = {
     inlineData: {
@@ -75,11 +80,18 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
 
   const result = await model.generateContent([PROMPT_IA, imagePart]);
   const textoLimpio = result.response.text().replace(/```json|```/g, '').trim();
-  const resultadoIA = JSON.parse(textoLimpio);
+  
+  let resultadoIA;
+  try {
+    resultadoIA = JSON.parse(textoLimpio);
+  } catch (error) {
+    console.error(`[Lector Worker Error] La IA no devolvió un JSON válido para ${hash_largo}. Respuesta cruda:`, textoLimpio);
+    throw new Error('Respuesta de IA no parseable a JSON'); // Fuerza a que el job pase al evento 'failed'
+  }
 
   if (resultadoIA.valido === true) {
     await pool.query(`
-      INSERT INTO comprobantes_fb (hash_largo, monto, moneda, banco, referencia, titular, procesado_ia)
+      INSERT INTO ${TABLA_DESTINO} (hash_largo, monto, moneda, banco, referencia, titular, procesado_ia)
       VALUES ($1, $2, $3, $4, $5, $6, TRUE)
       ON CONFLICT (hash_largo) DO UPDATE SET
         monto = EXCLUDED.monto,
@@ -98,7 +110,7 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
     ]);
 
     await pool.query(`UPDATE registros_raw SET estado = 'PROCESADO' WHERE hash_largo = $1`, [hash_largo]);
-    console.log(`[Lector Worker OK] Guardado comprobante válido: ${hash_largo}`);
+    console.log(`[Lector Worker OK] Guardado en ${TABLA_DESTINO}: ${hash_largo}`);
   } else {
     await pool.query(`UPDATE registros_raw SET estado = 'DESCARTADO' WHERE hash_largo = $1`, [hash_largo]);
     console.log(`[Lector Worker Descarte] Marcado como no válido: ${hash_largo}`);
@@ -113,4 +125,4 @@ worker.on('failed', async (job, err) => {
   }
 });
 
-console.log('[Lector Worker Service] Escuchando cola-analisis-ia...');
+console.log(`[Lector Worker Service] Escuchando cola-analisis-ia. Destino configurado: ${TABLA_DESTINO}`);
