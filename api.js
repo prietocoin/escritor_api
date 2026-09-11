@@ -5,7 +5,6 @@ const Redis = require('ioredis');
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-// Conexión a Redis
 const connection = new Redis({
   host: process.env.REDIS_HOST || '127.0.0.1',
   port: process.env.REDIS_PORT || 6379,
@@ -15,16 +14,16 @@ const connection = new Redis({
 
 const colaMensajes = new Queue('cola-escritor-atom', { connection });
 
-// Health check
 app.get('/', (req, res) => res.status(200).json({ status: 'ok', service: 'escritor-api' }));
 
-// Endpoint que recibirá la información
 app.post('/api/v1/webhook/whatsapp', async (req, res) => {
-  // Responde OK al instante para no mantener colgado al emisor
+  // Responde 200 OK inmediatamente a la fuente
   res.status(200).json({ status: 'processing' });
 
   try {
-    const body = req.body;
+    // Normaliza la entrada si viene envuelta en un arreglo desde n8n
+    const body = Array.isArray(req.body) ? req.body[0] : req.body;
+    
     const data = body.data || body;
     const key = data.key || {};
     const message = data.message || {};
@@ -32,7 +31,7 @@ app.post('/api/v1/webhook/whatsapp', async (req, res) => {
     const hash_largo = key.id || body.hash_largo;
     if (!hash_largo) return;
 
-    // Prepara el paquete limpio
+    // Payload ultra-liviano para Redis
     const payload = {
       hash_largo,
       hash_corto: body.hash_corto || (hash_largo.length >= 8 ? hash_largo.slice(-8) : hash_largo),
@@ -41,11 +40,10 @@ app.post('/api/v1/webhook/whatsapp', async (req, res) => {
       nombre_push: data.pushName || body.nombre_push || 'Desconocido',
       caption: message.imageMessage?.caption || message.conversation || message.extendedTextMessage?.text || body.caption || '',
       timestamp_msg: Number(data.messageTimestamp || body.timestamp_msg || Math.floor(Date.now() / 1000)),
-      es_imagen: !!message.imageMessage || body.es_imagen || false,
-      instance: body.instance || 'default'
+      es_imagen: Boolean(body.es_imagen || body.imagen_base64 || message.imageMessage),
+      instance: body.instance || data.instance || 'default'
     };
 
-    // Guarda el mensaje en la cola de Redis
     await colaMensajes.add('procesar-mensaje', payload, {
       removeOnComplete: true,
       attempts: 3,
