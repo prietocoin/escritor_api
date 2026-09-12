@@ -13,59 +13,48 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// ==========================================
-// HERRAMIENTA DE DIAGNÓSTICO (IDEA TUYA)
-// ==========================================
-// Visita: tu-dominio.com/api/esquema
-app.get('/api/esquema', async (req, res) => {
-  try {
-    const query = `
-      SELECT column_name, data_type 
-      FROM information_schema.columns 
-      WHERE table_name = 'registros_raw';
-    `;
-    const { rows } = await pool.query(query);
-    res.json({
-      mensaje: "Columnas reales en tu tabla registros_raw",
-      columnas: rows
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Rutina de autodestrucción (48 Horas)
+// Autodestrucción 48H ajustada a timestamp_msg (soporta milisegundos o segundos)
 async function ejecutarLimpieza48h() {
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
   try {
     const resTest = await pool.query(`DELETE FROM ${targetTable} WHERE creado_en < NOW() - INTERVAL '48 hours'`);
-    // temporalmente desactivamos el borrado raw hasta saber qué columna de fecha usar
-    // const resRaw = await pool.query(`DELETE FROM registros_raw WHERE creado_en < NOW() - INTERVAL '48 hours'`);
+    const resRaw = await pool.query(`
+      DELETE FROM registros_raw 
+      WHERE to_timestamp(
+        CASE 
+          WHEN timestamp_msg > 9999999999 THEN timestamp_msg / 1000 
+          ELSE timestamp_msg 
+        END
+      ) < NOW() - INTERVAL '48 hours'
+    `);
+    if (resRaw.rowCount > 0 || resTest.rowCount > 0) {
+      console.log(`[Panel Purga] Purgados ${resTest.rowCount} en ${targetTable} y ${resRaw.rowCount} en registros_raw.`);
+    }
   } catch (err) {
     console.error('[Panel Purga Error]:', err.message);
   }
 }
 setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
 
-// API UNIFICADA SEGURA
+// API UNIFICADA con columnas exactas de registros_raw
 app.get('/api/comprobantes', async (req, res) => {
   try {
     const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
-    
-    // Usamos c.creado_en para evitar el crash de r.creado_en
     const query = `
       SELECT 
         r.hash_largo,
         r.estado,
-        c.creado_en AS fecha_raw,
+        r.url_imagen,
+        r.timestamp_msg,
         c.monto,
         c.moneda,
         c.banco,
         c.referencia,
-        c.titular
+        c.titular,
+        c.creado_en
       FROM registros_raw r
       LEFT JOIN ${targetTable} c ON r.hash_largo = c.hash_largo
-      ORDER BY c.creado_en DESC NULLS LAST
+      ORDER BY r.timestamp_msg DESC NULLS LAST
       LIMIT 50
     `;
     const { rows } = await pool.query(query);
@@ -76,7 +65,7 @@ app.get('/api/comprobantes', async (req, res) => {
   }
 });
 
-// API Eliminar Registro
+// API Eliminar Registro en ambas tablas por hash_largo
 app.delete('/api/comprobantes/:hash', async (req, res) => {
   const { hash } = req.params;
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
@@ -97,7 +86,7 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Auditoría Unificada Visor IA</title>
+  <title>Auditoría Visor IA</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style> body { background-color: #0d131f; } .card-bg { background-color: #161f30; } </style>
 </head>
@@ -108,7 +97,7 @@ app.get('/', (req, res) => {
         <span class="text-2xl">🎟️</span>
         <div>
           <h1 class="text-xl font-bold text-white tracking-wide">Auditoría Visor IA</h1>
-          <p class="text-xs text-slate-400">Estado Raw + Extracción IA en una sola vista</p>
+          <p class="text-xs text-slate-400">Vista unificada (registros_raw + comprobantes_test)</p>
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-3 text-xs font-semibold">
@@ -119,13 +108,13 @@ app.get('/', (req, res) => {
       </div>
     </div>
     <div id="grid-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      <div class="col-span-full text-center py-12 text-slate-500">Cargando datos unificados...</div>
+      <div class="col-span-full text-center py-12 text-slate-500">Cargando registros...</div>
     </div>
   </div>
 
   <script>
     async function borrarRegistro(hash) {
-      if(!confirm('¿Deseas eliminar este registro de ambas tablas?')) return;
+      if(!confirm('¿Deseas eliminar este registro de la base de datos?')) return;
       try {
         await fetch('/api/comprobantes/' + hash, { method: 'DELETE' });
         cargar();
@@ -147,7 +136,7 @@ app.get('/', (req, res) => {
         document.getElementById('c-total').innerText = items.length;
 
         if (items.length === 0) {
-          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay comprobantes en la BD.</div>\`;
+          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay comprobantes en las últimas 48 horas.</div>\`;
           return;
         }
 
@@ -162,44 +151,44 @@ app.get('/', (req, res) => {
           else if (estado === 'DESCARTADO') badgeHTML = '<span class="bg-amber-500/10 text-amber-400 border border-amber-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full">🚫 DESCARTADO</span>';
           else badgeHTML = '<span class="bg-rose-500/10 text-rose-400 border border-rose-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full">❌ FALLO</span>';
 
-          const fechaTexto = item.fecha_raw 
-            ? new Date(item.fecha_raw).toLocaleString('es-ES') 
-            : 'Esperando validación...';
+          // Formateo dinámico de fecha (creado_en o timestamp_msg)
+          let fechaTexto = 'Sin Fecha';
+          if (item.creado_en) {
+            fechaTexto = new Date(item.creado_en).toLocaleString('es-ES');
+          } else if (item.timestamp_msg) {
+            const ts = Number(item.timestamp_msg);
+            fechaTexto = new Date(ts > 9999999999 ? ts : ts * 1000).toLocaleString('es-ES');
+          }
+
+          // Visualización de la imagen desde url_imagen
+          let imgHTML = '<div class="w-full h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">Sin Imagen</div>';
+          if (item.url_imagen) {
+            const src = item.url_imagen.startsWith('http') || item.url_imagen.startsWith('data:') 
+              ? item.url_imagen 
+              : 'data:image/jpeg;base64,' + item.url_imagen;
+            imgHTML = \`<img src="\${src}" class="w-full h-full object-cover cursor-pointer hover:scale-105 transition" onclick="window.open(this.src)" title="Click para abrir"/>\`;
+          }
 
           return \`
             <div class="card-bg border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col justify-between space-y-3 hover:border-slate-700 transition">
-              <!-- Encabezado con Hash y Estado -->
               <div class="flex justify-between items-center text-[10px] font-mono text-slate-400 border-b border-slate-800/80 pb-2">
                 <span title="\${item.hash_largo}">\${item.hash_largo ? item.hash_largo.substring(0, 16) : 'N/A'}...</span>
                 <div class="flex items-center gap-2">
                   \${badgeHTML}
-                  <button onclick="borrarRegistro('\${item.hash_largo}')" class="text-slate-500 hover:text-rose-400 transition p-1" title="Eliminar de la BD">🗑️</button>
+                  <button onclick="borrarRegistro('\${item.hash_largo}')" class="text-slate-500 hover:text-rose-400 transition p-1" title="Eliminar registro">🗑️</button>
                 </div>
               </div>
-
-              <!-- Cuerpo: Extracción de comprobantes_test -->
-              <div class="space-y-1.5 text-xs">
-                <div class="flex justify-between items-baseline">
-                  <span class="text-slate-400 font-medium">Monto:</span>
-                  <span class="font-bold text-sm \${item.monto ? 'text-emerald-400' : 'text-slate-500 italic'}">
-                    \${item.monto ? item.monto + ' ' + (item.moneda||'') : 'N/A'}
-                  </span>
+              <div class="flex gap-3 items-center">
+                <div class="w-24 h-28 bg-slate-900 rounded-lg overflow-hidden border border-slate-800 flex-shrink-0">
+                  \${imgHTML}
                 </div>
-                <div class="flex justify-between">
-                  <span class="text-slate-400">Banco:</span>
-                  <span class="font-semibold text-slate-200 truncate max-w-[140px]">\${item.banco || '—'}</span>
-                </div>
-                <div class="flex justify-between">
-                  <span class="text-slate-400">Titular:</span>
-                  <span class="text-slate-300 truncate max-w-[140px]">\${item.titular || '—'}</span>
-                </div>
-                <div class="flex justify-between font-mono text-[11px]">
-                  <span class="text-slate-400">Ref:</span>
-                  <span class="text-sky-400 font-bold truncate max-w-[140px]">\${item.referencia || '—'}</span>
+                <div class="flex-1 space-y-1.5 text-xs">
+                  <div class="flex justify-between items-baseline"><span class="text-slate-400 font-medium">Monto:</span><span class="font-bold text-sm \${item.monto ? 'text-emerald-400' : 'text-slate-500 italic'}">\${item.monto ? item.monto + ' ' + (item.moneda||'') : 'N/A'}</span></div>
+                  <div class="flex justify-between"><span class="text-slate-400">Banco:</span><span class="font-semibold text-slate-200 truncate max-w-[120px]">\${item.banco || '—'}</span></div>
+                  <div class="flex justify-between"><span class="text-slate-400">Titular:</span><span class="text-slate-300 truncate max-w-[120px]">\${item.titular || '—'}</span></div>
+                  <div class="flex justify-between font-mono text-[11px]"><span class="text-slate-400">Ref:</span><span class="text-sky-400 font-bold truncate max-w-[120px]">\${item.referencia || '—'}</span></div>
                 </div>
               </div>
-
-              <!-- Pie: Timestamp -->
               <div class="text-[10px] text-slate-500 font-mono text-right pt-1 border-t border-slate-800/50">
                 \${fechaTexto}
               </div>
