@@ -13,7 +13,7 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// 1. Rutina de Autodestrucción (48 Horas)
+// Rutina de autodestrucción (48 Horas)
 async function ejecutarLimpieza48h() {
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
   try {
@@ -28,16 +28,17 @@ async function ejecutarLimpieza48h() {
 }
 setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
 
-// 2. API LIGERA: Corrección de consulta SQL usando c.creado_en
+// API UNIFICADA: Cruce por hash_largo entre registros_raw y comprobantes_test
 app.get('/api/comprobantes', async (req, res) => {
   try {
     const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
+    
+    // Unimos los datos raw y la extracción mediante hash_largo
     const query = `
       SELECT 
         r.hash_largo,
         r.estado,
-        NULL AS imagen_base64,
-        c.creado_en,
+        r.creado_en AS fecha_raw,
         c.monto,
         c.moneda,
         c.banco,
@@ -45,8 +46,8 @@ app.get('/api/comprobantes', async (req, res) => {
         c.titular
       FROM registros_raw r
       LEFT JOIN ${targetTable} c ON r.hash_largo = c.hash_largo
-      ORDER BY c.creado_en DESC NULLS LAST
-      LIMIT 60
+      ORDER BY r.creado_en DESC
+      LIMIT 50
     `;
     const { rows } = await pool.query(query);
     res.json(rows);
@@ -56,7 +57,7 @@ app.get('/api/comprobantes', async (req, res) => {
   }
 });
 
-// 3. API Eliminar Registro
+// API Eliminar Registro en ambas tablas
 app.delete('/api/comprobantes/:hash', async (req, res) => {
   const { hash } = req.params;
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
@@ -69,7 +70,7 @@ app.delete('/api/comprobantes/:hash', async (req, res) => {
   }
 });
 
-// 4. Dashboard Web (Frontend HTML)
+// DASHBOARD UNIFICADO
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -77,7 +78,7 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Auditoría Visor IA</title>
+  <title>Auditoría Unificada Visor IA</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style> body { background-color: #0d131f; } .card-bg { background-color: #161f30; } </style>
 </head>
@@ -86,7 +87,10 @@ app.get('/', (req, res) => {
     <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-800 pb-4">
       <div class="flex items-center gap-2">
         <span class="text-2xl">🎟️</span>
-        <h1 class="text-xl font-bold text-white tracking-wide">Auditoría Visor IA</h1>
+        <div>
+          <h1 class="text-xl font-bold text-white tracking-wide">Auditoría Visor IA</h1>
+          <p class="text-xs text-slate-400">Estado Raw + Extracción IA en una sola vista</p>
+        </div>
       </div>
       <div class="flex flex-wrap items-center gap-3 text-xs font-semibold">
         <span class="bg-slate-800/80 px-3 py-1.5 rounded-full text-slate-300">Total: <strong id="c-total" class="text-white">0</strong></span>
@@ -96,13 +100,13 @@ app.get('/', (req, res) => {
       </div>
     </div>
     <div id="grid-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-      <div class="col-span-full text-center py-12 text-slate-500">Cargando comprobantes...</div>
+      <div class="col-span-full text-center py-12 text-slate-500">Cargando datos unificados...</div>
     </div>
   </div>
 
   <script>
     async function borrarRegistro(hash) {
-      if(!confirm('¿Deseas eliminar este registro de la base de datos?')) return;
+      if(!confirm('¿Deseas eliminar este registro de ambas tablas?')) return;
       try {
         await fetch('/api/comprobantes/' + hash, { method: 'DELETE' });
         cargar();
@@ -124,7 +128,7 @@ app.get('/', (req, res) => {
         document.getElementById('c-total').innerText = items.length;
 
         if (items.length === 0) {
-          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay comprobantes recientes.</div>\`;
+          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay comprobantes en las últimas 48 horas.</div>\`;
           return;
         }
 
@@ -139,30 +143,44 @@ app.get('/', (req, res) => {
           else if (estado === 'DESCARTADO') badgeHTML = '<span class="bg-amber-500/10 text-amber-400 border border-amber-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full">🚫 DESCARTADO</span>';
           else badgeHTML = '<span class="bg-rose-500/10 text-rose-400 border border-rose-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full">❌ FALLO</span>';
 
-          const fechaTexto = item.creado_en 
-            ? new Date(item.creado_en).toLocaleString('es-ES') 
+          const fechaTexto = item.fecha_raw 
+            ? new Date(item.fecha_raw).toLocaleString('es-ES') 
             : 'Sin Fecha';
 
           return \`
             <div class="card-bg border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col justify-between space-y-3 hover:border-slate-700 transition">
+              <!-- Encabezado con Hash y Estado -->
               <div class="flex justify-between items-center text-[10px] font-mono text-slate-400 border-b border-slate-800/80 pb-2">
                 <span title="\${item.hash_largo}">\${item.hash_largo ? item.hash_largo.substring(0, 16) : 'N/A'}...</span>
                 <div class="flex items-center gap-2">
                   \${badgeHTML}
-                  <button onclick="borrarRegistro('\${item.hash_largo}')" class="text-slate-500 hover:text-rose-400 transition p-1">🗑️</button>
+                  <button onclick="borrarRegistro('\${item.hash_largo}')" class="text-slate-500 hover:text-rose-400 transition p-1" title="Eliminar de la BD">🗑️</button>
                 </div>
               </div>
-              <div class="flex gap-3 items-center">
-                <div class="w-24 h-28 bg-slate-900 rounded-lg overflow-hidden border border-slate-800 flex-shrink-0 flex items-center justify-center text-[10px] text-slate-600 font-mono">
-                  Sin Imagen
+
+              <!-- Cuerpo: Extracción de comprobantes_test -->
+              <div class="space-y-1.5 text-xs">
+                <div class="flex justify-between items-baseline">
+                  <span class="text-slate-400 font-medium">Monto:</span>
+                  <span class="font-bold text-sm \${item.monto ? 'text-emerald-400' : 'text-slate-500 italic'}">
+                    \${item.monto ? item.monto + ' ' + (item.moneda||'') : 'N/A'}
+                  </span>
                 </div>
-                <div class="flex-1 space-y-1.5 text-xs">
-                  <div class="flex justify-between items-baseline"><span class="text-slate-400 font-medium">Monto:</span><span class="font-bold text-sm \${item.monto ? 'text-emerald-400' : 'text-slate-500 italic'}">\${item.monto ? item.monto + ' ' + (item.moneda||'') : 'N/A'}</span></div>
-                  <div class="flex justify-between"><span class="text-slate-400">Banco:</span><span class="font-semibold text-slate-200 truncate max-w-[120px]">\${item.banco || '—'}</span></div>
-                  <div class="flex justify-between"><span class="text-slate-400">Titular:</span><span class="text-slate-300 truncate max-w-[120px]">\${item.titular || '—'}</span></div>
-                  <div class="flex justify-between font-mono text-[11px]"><span class="text-slate-400">Ref:</span><span class="text-sky-400 font-bold truncate max-w-[120px]">\${item.referencia || '—'}</span></div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Banco:</span>
+                  <span class="font-semibold text-slate-200 truncate max-w-[140px]">\${item.banco || '—'}</span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-slate-400">Titular:</span>
+                  <span class="text-slate-300 truncate max-w-[140px]">\${item.titular || '—'}</span>
+                </div>
+                <div class="flex justify-between font-mono text-[11px]">
+                  <span class="text-slate-400">Ref:</span>
+                  <span class="text-sky-400 font-bold truncate max-w-[140px]">\${item.referencia || '—'}</span>
                 </div>
               </div>
+
+              <!-- Pie: Timestamp de registros_raw -->
               <div class="text-[10px] text-slate-500 font-mono text-right pt-1 border-t border-slate-800/50">
                 \${fechaTexto}
               </div>
