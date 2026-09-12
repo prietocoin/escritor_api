@@ -1,8 +1,10 @@
 const { Worker } = require('bullmq');
 const Redis = require('ioredis');
 const { Pool } = require('pg');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 const express = require('express');
 
+// 1. Conexión a Base de Datos PostgreSQL
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT) || 5432,
@@ -11,6 +13,7 @@ const pool = new Pool({
   database: process.env.DB_NAME,
 });
 
+// 2. Conexión a Redis
 const connection = new Redis({
   host: process.env.REDIS_HOST,
   port: Number(process.env.REDIS_PORT) || 6379,
@@ -18,54 +21,107 @@ const connection = new Redis({
   maxRetriesPerRequest: null,
 });
 
-// --- WORKER DE PERSISTENCIA ---
+// Selección aleatoria de API Key para Gemini
+function getRandomGenAI() {
+  const keysString = process.env.GEMINI_KEYS || process.env.GEMINI_API_KEY || '';
+  const keys = keysString.split(',').map(k => k.trim()).filter(Boolean);
+
+  if (keys.length === 0) {
+    throw new Error('No se ha configurado ninguna API Key válida.');
+  }
+
+  const randomKey = keys[Math.floor(Math.random() * keys.length)];
+  return new GoogleGenerativeAI(randomKey);
+}
+
+const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT;
+
+if (!SYSTEM_PROMPT) {
+  console.warn('[Lector Worker Warning] SYSTEM_PROMPT no está definido en las variables de entorno.');
+}
+
+// 3. Worker de Análisis con IA y Persistencia
 const worker = new Worker('cola-analisis-ia', async (job) => {
-  const { hash_largo, data } = job.data;
+  const { hash_largo, imageBase64, mimeType } = job.data;
+  console.log(`[Lector Worker] Procesando IA para: ${hash_largo}`);
+
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
 
   try {
-    if (data && data.valido === true) {
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    const cleanBase64 = imageBase64 && imageBase64.includes(',') 
+      ? imageBase64.split(',')[1] 
+      : imageBase64;
+
+    if (!cleanBase64) {
+      throw new Error('Payload de imagen inválido o sin contenido Base64.');
+    }
+
+    const genAI = getRandomGenAI();
+
+    const model = genAI.getGenerativeModel({ 
+      model: 'gemini-3.5-flash-lite',
+      systemInstruction: SYSTEM_PROMPT,
+      generationConfig: { responseMimeType: 'application/json' }
+    });
+
+    const imagePart = {
+      inlineData: {
+        data: cleanBase64.trim(),
+        mimeType: mimeType || 'image/jpeg'
+      }
+    };
+
+    const result = await model.generateContent([imagePart]);
+    const responseText = result.response.text();
+    const data = JSON.parse(responseText);
+
+    if (data.valido === true) {
       await pool.query(
         `INSERT INTO ${targetTable} (hash_largo, monto, moneda, banco, referencia, titular, creado_en)
          VALUES ($1, $2, $3, $4, $5, $6, NOW())
          ON CONFLICT (hash_largo) DO NOTHING`,
         [hash_largo, data.monto, data.moneda, data.banco, data.referencia, data.titular]
       );
+
       await pool.query(`UPDATE registros_raw SET estado = 'PROCESADO' WHERE hash_largo = $1`, [hash_largo]);
+      console.log(`[Lector Worker OK] Guardado en ${targetTable}: ${hash_largo}`);
     } else {
       await pool.query(`UPDATE registros_raw SET estado = 'DESCARTADO' WHERE hash_largo = $1`, [hash_largo]);
+      console.log(`[Lector Worker] Registro descartado: ${hash_largo}`);
     }
+
   } catch (err) {
-    console.error(`[Visor Error] ${hash_largo}:`, err.message);
+    console.error(`[Lector Worker Error] Tarea ${hash_largo} falló:`, err.message);
     await pool.query(`UPDATE registros_raw SET estado = 'FALLO' WHERE hash_largo = $1`, [hash_largo]);
     throw err;
   }
 }, { connection, concurrency: 2 });
 
-// --- RUTINA DE AUTODESTRUCCIÓN (48 HORAS) ---
+console.log('[Lector Worker Service] Escuchando tareas de análisis IA...');
+
+// 4. Rutina de Autodestrucción a las 48 Horas
 async function ejecutarLimpieza48h() {
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
   try {
-    // 1. Eliminar registros de comprobantes con más de 48 horas
     const resTest = await pool.query(
       `DELETE FROM ${targetTable} WHERE creado_en < NOW() - INTERVAL '48 hours'`
     );
-    // 2. Eliminar de registros_raw la basura/imágenes asociadas
     const resRaw = await pool.query(
       `DELETE FROM registros_raw WHERE creado_en < NOW() - INTERVAL '48 hours'`
     );
     if (resRaw.rowCount > 0 || resTest.rowCount > 0) {
-      console.log(`[Autodestrucción 48h] Purgados ${resTest.rowCount} registros y ${resRaw.rowCount} multimedia raw.`);
+      console.log(`[Autodestrucción 48h] Purgados ${resTest.rowCount} registros en ${targetTable} y ${resRaw.rowCount} en registros_raw.`);
     }
   } catch (err) {
     console.error('[Autodestrucción Error]:', err.message);
   }
 }
-// Ejecutar limpieza al iniciar y luego cada 30 minutos
 ejecutarLimpieza48h();
 setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
 
-// --- SERVIDOR WEB EXPRESS ---
+// 5. Servidor Web Express y API REST
 const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
@@ -93,6 +149,7 @@ app.get('/api/comprobantes', async (req, res) => {
     const { rows } = await pool.query(query);
     res.json(rows);
   } catch (err) {
+    console.error('[API Error]:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -110,7 +167,7 @@ app.delete('/api/comprobantes/:hash', async (req, res) => {
   }
 });
 
-// INTERFAZ GRÁFICA ESTILO AUDITORÍA
+// Interfaz Gráfica de Auditoría
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -128,7 +185,7 @@ app.get('/', (req, res) => {
 <body class="text-slate-200 min-h-screen p-4 md:p-6 font-sans">
   <div class="max-w-7xl mx-auto space-y-6">
     
-    <!-- Topbar -->
+    <!-- Header -->
     <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-800 pb-4">
       <div class="flex items-center gap-2">
         <span class="text-2xl">🎟️</span>
@@ -164,25 +221,41 @@ app.get('/', (req, res) => {
         const res = await fetch('/api/comprobantes');
         const items = await res.json();
 
+        if (!Array.isArray(items)) {
+          document.getElementById('c-total').innerText = '0';
+          document.getElementById('grid-container').innerHTML = \`
+            <div class="col-span-full text-center py-12 text-rose-400 font-mono text-xs">
+              ⚠️ Error en base de datos: \${items.error || 'Respuesta inesperada'}
+            </div>\`;
+          return;
+        }
+
         let procesados = 0, fallos = 0, descartados = 0;
         document.getElementById('c-total').innerText = items.length;
 
-        const html = items.map(item => {
-          if (item.estado === 'PROCESADO') procesados++;
-          else if (item.estado === 'FALLO') fallos++;
-          else if (item.estado === 'DESCARTADO') descartados++;
+        if (items.length === 0) {
+          document.getElementById('grid-container').innerHTML = \`
+            <div class="col-span-full text-center py-12 text-slate-500">
+              No hay comprobantes registrados en las últimas 48 horas.
+            </div>\`;
+          return;
+        }
 
-          // Badge de Estado
+        const html = items.map(item => {
+          const estado = item.estado || 'PROCESADO';
+          if (estado === 'PROCESADO') procesados++;
+          else if (estado === 'FALLO') fallos++;
+          else if (estado === 'DESCARTADO') descartados++;
+
           let badgeHTML = '';
-          if (item.estado === 'PROCESADO') {
+          if (estado === 'PROCESADO') {
             badgeHTML = '<span class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">✓ PROCESADO</span>';
-          } else if (item.estado === 'DESCARTADO') {
+          } else if (estado === 'DESCARTADO') {
             badgeHTML = '<span class="bg-amber-500/10 text-amber-400 border border-amber-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">🚫 DESCARTADO</span>';
           } else {
             badgeHTML = '<span class="bg-rose-500/10 text-rose-400 border border-rose-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">❌ FALLO</span>';
           }
 
-          // Imagen Base64
           const imgSrc = item.imagen_base64 
             ? (item.imagen_base64.startsWith('data:') ? item.imagen_base64 : 'data:image/jpeg;base64,' + item.imagen_base64)
             : 'https://via.placeholder.com/150?text=Sin+Imagen';
@@ -192,7 +265,7 @@ app.get('/', (req, res) => {
               
               <!-- Card Header -->
               <div class="flex justify-between items-center text-[10px] font-mono text-slate-400 border-b border-slate-800/80 pb-2">
-                <span title="\${item.hash_largo}">\${item.hash_largo.substring(0, 16)}...</span>
+                <span title="\${item.hash_largo}">\${item.hash_largo ? item.hash_largo.substring(0, 16) : 'N/A'}...</span>
                 <div class="flex items-center gap-2">
                   \${badgeHTML}
                   <button onclick="borrarRegistro('\${item.hash_largo}')" class="text-slate-500 hover:text-rose-400 transition p-1" title="Eliminar registro">
@@ -236,7 +309,7 @@ app.get('/', (req, res) => {
 
               <!-- Card Footer -->
               <div class="text-[10px] text-slate-500 font-mono text-right pt-1 border-t border-slate-800/50">
-                \${new Date(item.creado_en).toLocaleString('es-ES')}
+                \${item.creado_en ? new Date(item.creado_en).toLocaleString('es-ES') : ''}
               </div>
 
             </div>
@@ -259,4 +332,4 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.listen(PORT, () => console.log(`[Visor GUI] Dashboard visual activo en el puerto ${PORT}`));
+app.listen(PORT, () => console.log(`[Visor GUI] Dashboard web activo en el puerto ${PORT}`));
