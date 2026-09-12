@@ -13,32 +13,51 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
+// ==========================================
+// HERRAMIENTA DE DIAGNÓSTICO (IDEA TUYA)
+// ==========================================
+// Visita: tu-dominio.com/api/esquema
+app.get('/api/esquema', async (req, res) => {
+  try {
+    const query = `
+      SELECT column_name, data_type 
+      FROM information_schema.columns 
+      WHERE table_name = 'registros_raw';
+    `;
+    const { rows } = await pool.query(query);
+    res.json({
+      mensaje: "Columnas reales en tu tabla registros_raw",
+      columnas: rows
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Rutina de autodestrucción (48 Horas)
 async function ejecutarLimpieza48h() {
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
   try {
     const resTest = await pool.query(`DELETE FROM ${targetTable} WHERE creado_en < NOW() - INTERVAL '48 hours'`);
-    const resRaw = await pool.query(`DELETE FROM registros_raw WHERE creado_en < NOW() - INTERVAL '48 hours'`);
-    if (resRaw.rowCount > 0 || resTest.rowCount > 0) {
-      console.log(`[Panel Purga] Eliminados ${resTest.rowCount} en ${targetTable} y ${resRaw.rowCount} en registros_raw.`);
-    }
+    // temporalmente desactivamos el borrado raw hasta saber qué columna de fecha usar
+    // const resRaw = await pool.query(`DELETE FROM registros_raw WHERE creado_en < NOW() - INTERVAL '48 hours'`);
   } catch (err) {
     console.error('[Panel Purga Error]:', err.message);
   }
 }
 setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
 
-// API UNIFICADA: Cruce por hash_largo entre registros_raw y comprobantes_test
+// API UNIFICADA SEGURA
 app.get('/api/comprobantes', async (req, res) => {
   try {
     const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
     
-    // Unimos los datos raw y la extracción mediante hash_largo
+    // Usamos c.creado_en para evitar el crash de r.creado_en
     const query = `
       SELECT 
         r.hash_largo,
         r.estado,
-        r.creado_en AS fecha_raw,
+        c.creado_en AS fecha_raw,
         c.monto,
         c.moneda,
         c.banco,
@@ -46,7 +65,7 @@ app.get('/api/comprobantes', async (req, res) => {
         c.titular
       FROM registros_raw r
       LEFT JOIN ${targetTable} c ON r.hash_largo = c.hash_largo
-      ORDER BY r.creado_en DESC
+      ORDER BY c.creado_en DESC NULLS LAST
       LIMIT 50
     `;
     const { rows } = await pool.query(query);
@@ -57,7 +76,7 @@ app.get('/api/comprobantes', async (req, res) => {
   }
 });
 
-// API Eliminar Registro en ambas tablas
+// API Eliminar Registro
 app.delete('/api/comprobantes/:hash', async (req, res) => {
   const { hash } = req.params;
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
@@ -128,7 +147,7 @@ app.get('/', (req, res) => {
         document.getElementById('c-total').innerText = items.length;
 
         if (items.length === 0) {
-          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay comprobantes en las últimas 48 horas.</div>\`;
+          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay comprobantes en la BD.</div>\`;
           return;
         }
 
@@ -145,7 +164,7 @@ app.get('/', (req, res) => {
 
           const fechaTexto = item.fecha_raw 
             ? new Date(item.fecha_raw).toLocaleString('es-ES') 
-            : 'Sin Fecha';
+            : 'Esperando validación...';
 
           return \`
             <div class="card-bg border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col justify-between space-y-3 hover:border-slate-700 transition">
@@ -180,7 +199,7 @@ app.get('/', (req, res) => {
                 </div>
               </div>
 
-              <!-- Pie: Timestamp de registros_raw -->
+              <!-- Pie: Timestamp -->
               <div class="text-[10px] text-slate-500 font-mono text-right pt-1 border-t border-slate-800/50">
                 \${fechaTexto}
               </div>
