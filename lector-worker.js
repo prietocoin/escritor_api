@@ -1,3 +1,42 @@
+const { Worker } = require('bullmq');
+const Redis = require('ioredis');
+const { Pool } = require('pg');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+const pool = new Pool({
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT) || 5432,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME,
+});
+
+const connection = new Redis({
+  host: process.env.REDIS_HOST,
+  port: Number(process.env.REDIS_PORT) || 6379,
+  password: process.env.REDIS_PASSWORD || undefined,
+  maxRetriesPerRequest: null,
+});
+
+// Selección aleatoria de API Key
+function getRandomGenAI() {
+  const keysString = process.env.GEMINI_KEYS || process.env.GEMINI_API_KEY || '';
+  const keys = keysString.split(',').map(k => k.trim()).filter(Boolean);
+
+  if (keys.length === 0) {
+    throw new Error('No se ha configurado ninguna API Key válida.');
+  }
+
+  const randomKey = keys[Math.floor(Math.random() * keys.length)];
+  return new GoogleGenerativeAI(randomKey);
+}
+
+const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT;
+
+if (!SYSTEM_PROMPT) {
+  console.warn('[Lector Worker Warning] SYSTEM_PROMPT no está definido en las variables de entorno.');
+}
+
 const worker = new Worker('cola-analisis-ia', async (job) => {
   const { hash_largo, imageBase64, mimeType } = job.data;
   console.log(`[Lector Worker] Procesando IA para: ${hash_largo}`);
@@ -5,16 +44,21 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
 
   try {
+    // Pausa preventiva de 1.5s
     await new Promise(resolve => setTimeout(resolve, 1500));
 
-    // 1. Limpieza estricta del String Base64 (Elimina prefijos data:image/...)
-    const cleanBase64 = imageBase64.includes(',') 
+    // Limpieza de encabezados data:image/... para evitar enviar Base64 corrupto
+    const cleanBase64 = imageBase64 && imageBase64.includes(',') 
       ? imageBase64.split(',')[1] 
       : imageBase64;
 
+    if (!cleanBase64) {
+      throw new Error('Payload de imagen inválido o sin contenido Base64.');
+    }
+
     const genAI = getRandomGenAI();
 
-    // 2. Pasar el SYSTEM_PROMPT en systemInstruction (igual que n8n)
+    // systemInstruction replica el comportamiento exacto del nodo de n8n
     const model = genAI.getGenerativeModel({ 
       model: 'gemini-3.5-flash-lite',
       systemInstruction: SYSTEM_PROMPT,
@@ -28,7 +72,6 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
       }
     };
 
-    // 3. Enviar SOLO la parte visual (el modelo ya conoce el prompt de sistema)
     const result = await model.generateContent([imagePart]);
     const responseText = result.response.text();
     const data = JSON.parse(responseText);
@@ -54,3 +97,5 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
     throw err;
   }
 }, { connection, concurrency: 2 });
+
+console.log('[Lector Worker Service] Escuchando tareas de análisis IA...');
