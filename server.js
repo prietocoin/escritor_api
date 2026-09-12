@@ -1,155 +1,231 @@
 const express = require('express');
 const { Pool } = require('pg');
-const axios = require('axios');
-const FormData = require('form-data');
-const { Queue, Worker } = require('bullmq');
-const Redis = require('ioredis');
 
 const app = express();
-app.use(express.json({ limit: '50mb' }));
+const port = process.env.PORT || 3000;
 
-// 1. Configuración de PostgreSQL
 const pool = new Pool({
-  host: process.env.DB_HOST || '127.0.0.1',
-  port: process.env.DB_PORT || 5432,
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT) || 5432,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
 });
 
-// 2. Configuración de Redis y Cola BullMQ
-const redisConfig = {
-  host: process.env.REDIS_HOST || '127.0.0.1',
-  port: process.env.REDIS_PORT || 6379,
-  password: process.env.REDIS_PASSWORD || undefined,
-  maxRetriesPerRequest: null,
-};
-
-const connection = new Redis(redisConfig);
-const colaMensajes = new Queue('cola-escritor-atom', { connection });
-
-// Auto-inicialización del esquema de base de datos
-async function initSchema() {
-  const query = `
-    CREATE TABLE IF NOT EXISTS registros_raw (
-      hash_largo VARCHAR(255) PRIMARY KEY,
-      hash_corto VARCHAR(20),
-      grupo_raw VARCHAR(100),
-      usuario_raw VARCHAR(100),
-      nombre_push VARCHAR(150),
-      caption TEXT,
-      conteo INT DEFAULT 1,
-      grupo_raw_2 VARCHAR(100),
-      usuario_raw_2 VARCHAR(100),
-      url_imagen TEXT,
-      timestamp_msg BIGINT,
-      estado VARCHAR(50) DEFAULT 'PROCESADO'
-    );
-    CREATE INDEX IF NOT EXISTS idx_raw_hash ON registros_raw(hash_corto);
-  `;
+// API REST para obtener raw + IA cruzados
+app.get('/api/comprobantes', async (req, res) => {
   try {
-    await pool.query(query);
-    console.log('[escritorAtom] Esquema verificado/creado exitosamente.');
+    const { rows } = await pool.query(`
+      SELECT 
+        r.hash_largo,
+        r.url_imagen,
+        r.estado AS estado_raw,
+        r.timestamp_msg,
+        c.monto,
+        c.moneda,
+        c.banco,
+        c.referencia,
+        c.titular,
+        c.creado_en AS fecha_procesado
+      FROM registros_raw r
+      LEFT JOIN comprobantes_test c ON r.hash_largo = c.hash_largo
+      ORDER BY r.timestamp_msg::bigint DESC
+      LIMIT 100;
+    `);
+    res.json({ success: true, data: rows });
   } catch (err) {
-    console.error('[escritorAtom] Error al inicializar esquema:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
-}
+});
 
-// Health Check para EasyPanel
+// Servir la interfaz HTML del Visor
 app.get('/', (req, res) => {
-  res.status(200).json({ status: 'ok', service: 'escritorAtom', queue: 'active' });
-});
+  res.send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auditoría de Comprobantes - Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen pb-12">
+  <header class="sticky top-0 z-30 bg-slate-800/95 backdrop-blur border-b border-slate-700 px-4 py-3 shadow-md">
+    <div class="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-3">
+      <div class="flex items-center gap-2">
+        <i class="fa-solid fa-receipt text-indigo-400 text-2xl"></i>
+        <h1 class="font-bold text-lg text-white">Auditoría Visor IA</h1>
+      </div>
+      <div class="flex gap-2 text-xs font-semibold">
+        <span id="badge-total" class="bg-slate-700 text-slate-200 px-2.5 py-1 rounded-full">Total: 0</span>
+        <span id="badge-ok" class="bg-emerald-950 text-emerald-400 border border-emerald-800 px-2.5 py-1 rounded-full">Procesados: 0</span>
+        <span id="badge-fail" class="bg-rose-950 text-rose-400 border border-rose-800 px-2.5 py-1 rounded-full">Fallos: 0</span>
+        <span id="badge-discard" class="bg-amber-950 text-amber-400 border border-amber-800 px-2.5 py-1 rounded-full">Descartados: 0</span>
+      </div>
+    </div>
+  </header>
 
-// 3. Endpoint ultrarrápido: Recibe la petición y la encola en Redis
-app.post('/api/v1/raw/escribir-completo', async (req, res) => {
-  const { hash_corto, hash_largo } = req.body;
+  <main class="max-w-7xl mx-auto px-4 mt-6">
+    <div class="flex flex-col sm:flex-row gap-3 mb-6">
+      <div class="relative flex-1">
+        <i class="fa-solid fa-magnifying-glass absolute left-3 top-3.5 text-slate-400 text-sm"></i>
+        <input type="text" id="searchInput" placeholder="Buscar por banco, titular, referencia o hash..." 
+          class="w-full pl-9 pr-4 py-2.5 bg-slate-800 border border-slate-700 rounded-lg text-sm text-white placeholder-slate-400 focus:outline-none focus:border-indigo-500 transition">
+      </div>
+      <div class="flex gap-2 overflow-x-auto pb-1">
+        <button onclick="setFilter('ALL')" class="filter-btn active bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition">Todos</button>
+        <button onclick="setFilter('PROCESADO')" class="filter-btn bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition">Procesados</button>
+        <button onclick="setFilter('FALLO')" class="filter-btn bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition">Fallos</button>
+        <button onclick="setFilter('DESCARTADO')" class="filter-btn bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition">Descartados</button>
+      </div>
+    </div>
 
-  if (!hash_largo || !hash_corto) {
-    return res.status(400).json({ success: false, error: 'Hashes requeridos' });
-  }
+    <div id="cardsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+  </main>
 
-  try {
-    // Agrega el trabajo a la cola de Redis
-    const job = await colaMensajes.add('procesar-mensaje', req.body, {
-      removeOnComplete: true, // Limpia memoria al terminar
-      attempts: 3,            // Reintenta 3 veces si falla
-      backoff: 2000          // Espera 2 segundos entre reintentos
+  <div id="imageModal" class="fixed inset-0 z-50 bg-black/90 hidden backdrop-blur-sm flex items-center justify-center p-2" onclick="closeModal()">
+    <div class="relative max-w-4xl max-h-full flex flex-col items-center justify-center" onclick="event.stopPropagation()">
+      <button onclick="closeModal()" class="absolute -top-10 right-0 text-white text-2xl hover:text-rose-400">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
+      <img id="modalImg" src="" class="max-h-[85vh] max-w-full rounded-lg object-contain shadow-2xl border border-slate-700">
+      <div class="mt-2 text-center">
+        <a id="modalLink" href="" target="_blank" class="text-xs text-indigo-400 hover:underline"><i class="fa-solid fa-arrow-up-right-from-square"></i> Abrir imagen original</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let dataList = [];
+    let currentFilter = 'ALL';
+    let searchQuery = '';
+
+    async function loadData() {
+      try {
+        const res = await fetch('/api/comprobantes');
+        const json = await res.json();
+        if (json.success) {
+          dataList = json.data;
+          render();
+        }
+      } catch (err) {
+        console.error('Error cargando datos:', err);
+      }
+    }
+
+    function render() {
+      updateBadges();
+      const grid = document.getElementById('cardsGrid');
+      grid.innerHTML = '';
+
+      const filtered = dataList.filter(item => {
+        const matchesFilter = currentFilter === 'ALL' || item.estado_raw === currentFilter;
+        const matchesSearch = !searchQuery || 
+          (item.hash_largo && item.hash_largo.toLowerCase().includes(searchQuery)) ||
+          (item.banco && item.banco.toLowerCase().includes(searchQuery)) ||
+          (item.titular && item.titular.toLowerCase().includes(searchQuery)) ||
+          (item.referencia && item.referencia.toLowerCase().includes(searchQuery));
+        return matchesFilter && matchesSearch;
+      });
+
+      filtered.forEach(item => {
+        grid.appendChild(createCard(item));
+      });
+    }
+
+    function createCard(item) {
+      const card = document.createElement('div');
+      card.className = "bg-slate-800 border border-slate-700 rounded-xl overflow-hidden flex flex-col justify-between shadow-lg hover:border-slate-600 transition";
+      const statusBadge = getStatusBadge(item.estado_raw);
+      const imageSrc = item.url_imagen || 'https://via.placeholder.com/400x300?text=Sin+Imagen';
+
+      card.innerHTML = \`
+        <div>
+          <div class="p-3 bg-slate-800/80 border-b border-slate-700/50 flex justify-between items-center">
+            <span class="text-[10px] font-mono text-slate-400 truncate max-w-[180px]" title="\${item.hash_largo}">
+              \${item.hash_largo}
+            </span>
+            \${statusBadge}
+          </div>
+          <div class="p-4 grid grid-cols-1 sm:grid-cols-3 gap-3 items-center">
+            <div class="sm:col-span-1 relative group cursor-pointer overflow-hidden rounded-lg border border-slate-700 bg-slate-950 h-36 flex items-center justify-center" onclick="openModal('\${imageSrc}')">
+              <img src="\${imageSrc}" class="object-cover h-full w-full group-hover:scale-105 transition duration-300" loading="lazy">
+              <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition text-white text-xs gap-1 font-semibold">
+                <i class="fa-solid fa-magnifying-glass-plus"></i> Ver
+              </div>
+            </div>
+            <div class="sm:col-span-2 space-y-1.5 text-xs">
+              <div class="flex justify-between items-baseline border-b border-slate-700/50 pb-1">
+                <span class="text-slate-400">Monto:</span>
+                <span class="text-base font-bold text-emerald-400">\${item.monto ? \`\${item.monto} \${item.moneda || ''}\` : '<i class="text-slate-500 font-normal">N/A</i>'}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Banco:</span>
+                <span class="font-medium text-slate-200 truncate max-w-[140px]">\${item.banco || '—'}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Titular:</span>
+                <span class="font-medium text-slate-200 truncate max-w-[140px]">\${item.titular || '—'}</span>
+              </div>
+              <div class="flex justify-between">
+                <span class="text-slate-400">Referencia:</span>
+                <span class="font-mono text-indigo-300 font-semibold">\${item.referencia || '—'}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      \`;
+      return card;
+    }
+
+    function getStatusBadge(status) {
+      if (status === 'PROCESADO') return \`<span class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] font-bold px-2 py-0.5 rounded-full"><i class="fa-solid fa-circle-check mr-1"></i>PROCESADO</span>\`;
+      if (status === 'FALLO') return \`<span class="bg-rose-500/10 text-rose-400 border border-rose-500/20 text-[10px] font-bold px-2 py-0.5 rounded-full"><i class="fa-solid fa-circle-xmark mr-1"></i>FALLO</span>\`;
+      if (status === 'DESCARTADO') return \`<span class="bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[10px] font-bold px-2 py-0.5 rounded-full"><i class="fa-solid fa-ban mr-1"></i>DESCARTADO</span>\`;
+      return \`<span class="bg-slate-700 text-slate-300 text-[10px] font-bold px-2 py-0.5 rounded-full">\${status}</span>\`;
+    }
+
+    function updateBadges() {
+      document.getElementById('badge-total').innerText = \`Total: \${dataList.length}\`;
+      document.getElementById('badge-ok').innerText = \`Procesados: \${dataList.filter(d=>d.estado_raw==='PROCESADO').length}\`;
+      document.getElementById('badge-fail').innerText = \`Fallos: \${dataList.filter(d=>d.estado_raw==='FALLO').length}\`;
+      document.getElementById('badge-discard').innerText = \`Descartados: \${dataList.filter(d=>d.estado_raw==='DESCARTADO').length}\`;
+    }
+
+    function setFilter(type) {
+      currentFilter = type;
+      document.querySelectorAll('.filter-btn').forEach(btn => {
+        btn.classList.remove('bg-indigo-600', 'text-white');
+        btn.classList.add('bg-slate-800', 'text-slate-300');
+      });
+      event.target.classList.remove('bg-slate-800', 'text-slate-300');
+      event.target.classList.add('bg-indigo-600', 'text-white');
+      render();
+    }
+
+    function openModal(url) {
+      document.getElementById('modalImg').src = url;
+      document.getElementById('modalLink').href = url;
+      document.getElementById('imageModal').classList.remove('hidden');
+    }
+
+    function closeModal() {
+      document.getElementById('imageModal').classList.add('hidden');
+    }
+
+    document.getElementById('searchInput').addEventListener('input', (e) => {
+      searchQuery = e.target.value.toLowerCase();
+      render();
     });
 
-    return res.status(200).json({
-      success: true,
-      message: 'Mensaje encolado en Redis correctamente',
-      jobId: job.id
-    });
-  } catch (error) {
-    console.error('[escritorAtom Error Encolar]', error.message);
-    return res.status(500).json({ success: false, error: 'Fallo al agregar a la cola' });
-  }
+    window.onload = loadData;
+  </script>
+</body>
+</html>
+  `);
 });
 
-// 4. Worker en segundo plano: Procesa los trabajos de Redis hacia R2 y Postgres
-const worker = new Worker('cola-escritor-atom', async (job) => {
-  const {
-    hash_corto,
-    hash_largo,
-    grupo_raw,
-    usuario_raw,
-    nombre_push,
-    caption,
-    timestamp_msg,
-    imagen_base64
-  } = job.data;
-
-  let urlR2 = null;
-
-  // Subida de imagen a R2
-  if (imagen_base64) {
-    const bufferImagen = Buffer.from(imagen_base64, 'base64');
-    const form = new FormData();
-    form.append('file', bufferImagen, `${hash_corto}.jpg`);
-
-    await axios.post('https://api.jairokov.com/upload', form, {
-      headers: { ...form.getHeaders() },
-      timeout: 10000
-    });
-
-    urlR2 = `https://pub-49b9c87f6e6a418ba42de5ba36ddc73e.r2.dev/${hash_corto}.jpg`;
-  }
-
-  // Transacción UPSERT en PostgreSQL
-  const queryUpsert = `
-    INSERT INTO registros_raw (
-      hash_corto, hash_largo, grupo_raw, usuario_raw, nombre_push, 
-      caption, timestamp_msg, url_imagen, conteo, estado
-    )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 'PROCESADO')
-    ON CONFLICT (hash_largo) DO UPDATE SET 
-      conteo = registros_raw.conteo + 1,
-      grupo_raw_2 = CASE WHEN registros_raw.grupo_raw <> EXCLUDED.grupo_raw THEN EXCLUDED.grupo_raw ELSE registros_raw.grupo_raw_2 END,
-      usuario_raw_2 = CASE WHEN registros_raw.usuario_raw <> EXCLUDED.usuario_raw THEN EXCLUDED.usuario_raw ELSE registros_raw.usuario_raw_2 END,
-      url_imagen = COALESCE(EXCLUDED.url_imagen, registros_raw.url_imagen),
-      timestamp_msg = EXCLUDED.timestamp_msg,
-      estado = 'PROCESADO'
-    RETURNING (xmax = 0) AS es_nuevo, hash_corto, conteo, url_imagen;
-  `;
-
-  const values = [
-    hash_corto, hash_largo, grupo_raw, usuario_raw, 
-    nombre_push, caption, timestamp_msg, urlR2
-  ];
-
-  const result = await pool.query(queryUpsert, values);
-  console.log(`[Worker] Procesado Hash: ${hash_corto} | Es nuevo: ${result.rows[0].es_nuevo}`);
-  return result.rows[0];
-
-}, { connection });
-
-worker.on('failed', (job, err) => {
-  console.error(`[Worker Error] Trabajo ${job.id} falló:`, err.message);
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  initSchema();
-  console.log(`[escritorAtom] Servicio escuchando en puerto ${PORT}`);
+app.listen(port, () => {
+  console.log(`[Visor Service] Dashboard activo en puerto ${port}`);
 });
