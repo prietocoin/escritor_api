@@ -72,5 +72,6 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
     throw err;
   }
 }, { connection, concurrency: 3 });
+await new Promise(resolve => setTimeout(resolve, 4500));
 
 console.log('[Lector Worker Service] Escuchando tareas de análisis IA...');
