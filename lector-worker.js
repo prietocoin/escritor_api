@@ -18,7 +18,18 @@ const connection = new Redis({
   maxRetriesPerRequest: null,
 });
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// Función para seleccionar una API Key al azar entre GEMINI_KEYS (o fallback a GEMINI_API_KEY)
+function getRandomGenAI() {
+  const keysString = process.env.GEMINI_KEYS || process.env.GEMINI_API_KEY || '';
+  const keys = keysString.split(',').map(k => k.trim()).filter(Boolean);
+  
+  if (keys.length === 0) {
+    throw new Error('No se ha configurado ninguna API Key válida.');
+  }
+
+  const randomKey = keys[Math.floor(Math.random() * keys.length)];
+  return new GoogleGenerativeAI(randomKey);
+}
 
 // Lee el prompt directamente del entorno
 const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT;
@@ -26,6 +37,7 @@ const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT;
 if (!SYSTEM_PROMPT) {
   console.warn('[Lector Worker Warning] SYSTEM_PROMPT no está definido en las variables de entorno.');
 }
+
 const worker = new Worker('cola-analisis-ia', async (job) => {
   const { hash_largo, imageBase64, mimeType } = job.data;
   console.log(`[Lector Worker] Procesando IA para: ${hash_largo}`);
@@ -33,11 +45,15 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
 
   try {
-    // Configuración del modelo Gemini con salida JSON forzada
+    // 1. Pausa de 1.5s DENTRO de la función async para prevenir el error 429
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    // 2. Instancia dinámicamente Gemini usando una clave aleatoria
+    const genAI = getRandomGenAI();
     const model = genAI.getGenerativeModel({ 
-  model: 'gemini-3.5-flash-lite',
-  generationConfig: { responseMimeType: 'application/json' }
-});
+      model: 'gemini-3.5-flash-lite',
+      generationConfig: { responseMimeType: 'application/json' }
+    });
 
     const imagePart = {
       inlineData: {
@@ -51,7 +67,7 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
     const data = JSON.parse(responseText);
 
     if (data.valido === true) {
-      // Guardar extracción exitosa en la tabla de destino
+      // Guardar extracción exitosa
       await pool.query(
         `INSERT INTO ${targetTable} (hash_largo, monto, moneda, banco, referencia, titular, creado_en)
          VALUES ($1, $2, $3, $4, $5, $6, NOW())
@@ -71,7 +87,6 @@ const worker = new Worker('cola-analisis-ia', async (job) => {
     await pool.query(`UPDATE registros_raw SET estado = 'FALLO' WHERE hash_largo = $1`, [hash_largo]);
     throw err;
   }
-}, { connection, concurrency: 3 });
-await new Promise(resolve => setTimeout(resolve, 4500));
+}, { connection, concurrency: 2 });
 
 console.log('[Lector Worker Service] Escuchando tareas de análisis IA...');
