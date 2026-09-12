@@ -1,6 +1,7 @@
 const express = require('express');
 const { Pool } = require('pg');
 
+// Conexión a PostgreSQL
 const pool = new Pool({
   host: process.env.DB_HOST,
   port: Number(process.env.DB_PORT) || 5432,
@@ -13,11 +14,18 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// 1. Rutina de Autodestrucción 48h (Ajustada a timestamp_msg y creado_en)
+// ==========================================
+// 1. RUTINA DE MANTENIMIENTO AUTOMÁTICO
+// ==========================================
 async function ejecutarLimpieza48h() {
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
   try {
-    const resTest = await pool.query(`DELETE FROM ${targetTable} WHERE creado_en < NOW() - INTERVAL '48 hours'`);
+    // 1. Borra comprobantes procesados antiguos (48h)
+    const resTest = await pool.query(
+      `DELETE FROM ${targetTable} WHERE creado_en < NOW() - INTERVAL '48 hours'`
+    );
+
+    // 2. Borra raw antiguos (48h ajustado al formato timestamp_msg)
     const resRaw = await pool.query(`
       DELETE FROM registros_raw 
       WHERE to_timestamp(
@@ -27,23 +35,56 @@ async function ejecutarLimpieza48h() {
         END
       ) < NOW() - INTERVAL '48 hours'
     `);
-    if (resRaw.rowCount > 0 || resTest.rowCount > 0) {
-      console.log(`[Panel Purga] Eliminados ${resTest.rowCount} en ${targetTable} y ${resRaw.rowCount} en registros_raw.`);
+
+    // 3. Purga inmediata de texto plano o registros sin imagen
+    const resSinImagen = await pool.query(
+      `DELETE FROM registros_raw WHERE url_imagen IS NULL OR url_imagen = ''`
+    );
+
+    if (resRaw.rowCount > 0 || resTest.rowCount > 0 || resSinImagen.rowCount > 0) {
+      console.log(`[Panel Purga OK] Purgados: ${resTest.rowCount} en ${targetTable}, ${resRaw.rowCount} en registros_raw y ${resSinImagen.rowCount} vacíos/texto.`);
     }
   } catch (err) {
     console.error('[Panel Purga Error]:', err.message);
   }
 }
+// Ejecutar cada 30 minutos
 setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
+// Ejecutar una vez al arrancar
+ejecutarLimpieza48h();
 
-// 2. API UNIFICADA: Lectura completa con Fallbacks (Raw + IA)
+// ==========================================
+// 2. API ENDPOINTS
+// ==========================================
+
+// Endpoint de diagnóstico para revisar columnas
+app.get('/api/esquema', async (req, res) => {
+  try {
+    const query = `
+      SELECT column_name, data_type 
+      FROM information_schema.columns 
+      WHERE table_name = 'registros_raw';
+    `;
+    const { rows } = await pool.query(query);
+    res.json({ mensaje: "Columnas reales en registros_raw", columnas: rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API Principal: Cruce de datos Raw + IA (Filtrado por Instancia JAIRO)
 app.get('/api/comprobantes', async (req, res) => {
   try {
     const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
+    
     const query = `
       SELECT 
         r.hash_largo,
-        r.estado,
+        CASE 
+          WHEN r.url_imagen IS NULL OR r.url_imagen = '' THEN 'DESCARTADO'
+          WHEN c.hash_largo IS NULL AND r.estado = 'PROCESADO' THEN 'DESCARTADO'
+          ELSE COALESCE(r.estado, 'DESCARTADO')
+        END AS estado,
         r.url_imagen,
         r.timestamp_msg,
         r.nombre_push,
@@ -60,8 +101,15 @@ app.get('/api/comprobantes', async (req, res) => {
         c.creado_en
       FROM registros_raw r
       LEFT JOIN ${targetTable} c ON r.hash_largo = c.hash_largo
+      WHERE (
+        r.usuario_raw ILIKE '%JAIRO%' 
+        OR r.usuario_raw_2 ILIKE '%JAIRO%' 
+        OR r.grupo_raw ILIKE '%JAIRO%' 
+        OR r.grupo_raw_2 ILIKE '%JAIRO%'
+        OR r.nombre_push ILIKE '%JAIRO%'
+      )
       ORDER BY r.timestamp_msg DESC NULLS LAST
-      LIMIT 50
+      LIMIT 60
     `;
     const { rows } = await pool.query(query);
     res.json(rows);
@@ -71,7 +119,7 @@ app.get('/api/comprobantes', async (req, res) => {
   }
 });
 
-// 3. API Eliminar Registro de ambas tablas por hash_largo
+// API Eliminar Registro manualmente
 app.delete('/api/comprobantes/:hash', async (req, res) => {
   const { hash } = req.params;
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
@@ -84,7 +132,9 @@ app.delete('/api/comprobantes/:hash', async (req, res) => {
   }
 });
 
-// 4. DASHBOARD WEB (Interfaz visual oscura)
+// ==========================================
+// 3. DASHBOARD WEB (Interfaz Gráfica)
+// ==========================================
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -105,7 +155,7 @@ app.get('/', (req, res) => {
         <span class="text-2xl">🎟️</span>
         <div>
           <h1 class="text-xl font-bold text-white tracking-wide">Auditoría Visor IA</h1>
-          <p class="text-xs text-slate-400">Inspección de datos Raw de WhatsApp y extracción estructurada IA</p>
+          <p class="text-xs text-slate-400">Instancia JAIRO - Raw + Extracción IA</p>
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-3 text-xs font-semibold">
@@ -124,7 +174,7 @@ app.get('/', (req, res) => {
 
   <script>
     async function borrarRegistro(hash) {
-      if(!confirm('¿Deseas eliminar este registro de la base de datos?')) return;
+      if(!confirm('¿Deseas eliminar este registro permanentemente?')) return;
       try {
         await fetch('/api/comprobantes/' + hash, { method: 'DELETE' });
         cargar();
@@ -146,15 +196,15 @@ app.get('/', (req, res) => {
         document.getElementById('c-total').innerText = items.length;
 
         if (items.length === 0) {
-          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay comprobantes en las últimas 48 horas.</div>\`;
+          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay comprobantes de JAIRO en las últimas 48 horas.</div>\`;
           return;
         }
 
         const html = items.map(item => {
-          const estado = item.estado || 'PROCESADO';
+          const estado = item.estado || 'DESCARTADO';
           if (estado === 'PROCESADO') procesados++;
           else if (estado === 'FALLO') fallos++;
-          else if (estado === 'DESCARTADO') descartados++;
+          else descartados++;
 
           let badgeHTML = '';
           if (estado === 'PROCESADO') badgeHTML = '<span class="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full">✓ PROCESADO</span>';
@@ -170,7 +220,7 @@ app.get('/', (req, res) => {
             fechaTexto = new Date(ts > 9999999999 ? ts : ts * 1000).toLocaleString('es-ES');
           }
 
-          // Formateo de imagen desde url_imagen
+          // Formateo de imagen
           let imgHTML = '<div class="w-full h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">Sin Imagen</div>';
           if (item.url_imagen) {
             const src = item.url_imagen.startsWith('http') || item.url_imagen.startsWith('data:') 
@@ -179,7 +229,7 @@ app.get('/', (req, res) => {
             imgHTML = \`<img src="\${src}" class="w-full h-full object-cover cursor-pointer hover:scale-105 transition" onclick="window.open(this.src)" title="Click para abrir imagen"/>\`;
           }
 
-          // Fallbacks para datos RAW de WhatsApp
+          // Fallbacks para datos RAW
           const remitenteNombre = item.nombre_push || 'Anónimo';
           const usuarioID = item.usuario_raw_2 || item.usuario_raw || '';
           const grupoID = item.grupo_raw_2 || item.grupo_raw || null;
@@ -187,7 +237,7 @@ app.get('/', (req, res) => {
           return \`
             <div class="card-bg border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col justify-between space-y-3 hover:border-slate-700 transition">
               
-              <!-- Card Header -->
+              <!-- Header -->
               <div class="flex justify-between items-center text-[10px] font-mono text-slate-400 border-b border-slate-800/80 pb-2">
                 <span title="\${item.hash_largo}">\${item.hash_largo ? item.hash_largo.substring(0, 16) : 'N/A'}...</span>
                 <div class="flex items-center gap-2">
@@ -196,9 +246,9 @@ app.get('/', (req, res) => {
                 </div>
               </div>
 
-              <!-- Card Body -->
+              <!-- Body -->
               <div class="flex gap-3 items-start">
-                <!-- Thumbnail -->
+                <!-- Imagen -->
                 <div class="w-24 h-36 bg-slate-900 rounded-lg overflow-hidden border border-slate-800 flex-shrink-0">
                   \${imgHTML}
                 </div>
@@ -206,7 +256,7 @@ app.get('/', (req, res) => {
                 <!-- Detalles -->
                 <div class="flex-1 space-y-2 text-xs overflow-hidden">
                   
-                  <!-- Bloque RAW WhatsApp -->
+                  <!-- Info RAW WhatsApp -->
                   <div class="bg-slate-900/70 p-2 rounded border border-slate-800/70 space-y-1 font-mono text-[10px]">
                     <div class="flex justify-between items-center">
                       <span class="text-slate-400 font-sans">Remitente:</span>
@@ -229,7 +279,7 @@ app.get('/', (req, res) => {
                     \` : ''}
                   </div>
 
-                  <!-- Bloque Extracción IA -->
+                  <!-- Info IA -->
                   <div class="space-y-1">
                     <div class="flex justify-between items-baseline">
                       <span class="text-slate-400 font-medium">Monto:</span>
@@ -250,7 +300,7 @@ app.get('/', (req, res) => {
                 </div>
               </div>
 
-              <!-- Card Footer -->
+              <!-- Footer -->
               <div class="text-[10px] text-slate-500 font-mono text-right pt-1 border-t border-slate-800/50">
                 \${fechaTexto}
               </div>
@@ -274,4 +324,5 @@ app.get('/', (req, res) => {
   `);
 });
 
+// Iniciar servidor
 app.listen(PORT, () => console.log(`[Panel Service] Activo en puerto ${PORT}`));
