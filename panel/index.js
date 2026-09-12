@@ -13,7 +13,22 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// API LIGERA: Evita el error de imagen_base64 y no satura la red
+// 1. Rutina de Autodestrucción (48 Horas)
+async function ejecutarLimpieza48h() {
+  const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
+  try {
+    const resTest = await pool.query(`DELETE FROM ${targetTable} WHERE creado_en < NOW() - INTERVAL '48 hours'`);
+    const resRaw = await pool.query(`DELETE FROM registros_raw WHERE creado_en < NOW() - INTERVAL '48 hours'`);
+    if (resRaw.rowCount > 0 || resTest.rowCount > 0) {
+      console.log(`[Panel Purga] Eliminados ${resTest.rowCount} en ${targetTable} y ${resRaw.rowCount} en registros_raw.`);
+    }
+  } catch (err) {
+    console.error('[Panel Purga Error]:', err.message);
+  }
+}
+setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
+
+// 2. API LIGERA: Corrección de consulta SQL usando c.creado_en
 app.get('/api/comprobantes', async (req, res) => {
   try {
     const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
@@ -22,7 +37,7 @@ app.get('/api/comprobantes', async (req, res) => {
         r.hash_largo,
         r.estado,
         NULL AS imagen_base64,
-        r.creado_en,
+        c.creado_en,
         c.monto,
         c.moneda,
         c.banco,
@@ -30,7 +45,7 @@ app.get('/api/comprobantes', async (req, res) => {
         c.titular
       FROM registros_raw r
       LEFT JOIN ${targetTable} c ON r.hash_largo = c.hash_largo
-      ORDER BY r.creado_en DESC
+      ORDER BY c.creado_en DESC NULLS LAST
       LIMIT 60
     `;
     const { rows } = await pool.query(query);
@@ -41,6 +56,7 @@ app.get('/api/comprobantes', async (req, res) => {
   }
 });
 
+// 3. API Eliminar Registro
 app.delete('/api/comprobantes/:hash', async (req, res) => {
   const { hash } = req.params;
   const targetTable = process.env.TARGET_TABLE || 'comprobantes_test';
@@ -53,7 +69,7 @@ app.delete('/api/comprobantes/:hash', async (req, res) => {
   }
 });
 
-// DASHBOARD WEB (El grid visual oscuro)
+// 4. Dashboard Web (Frontend HTML)
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -123,6 +139,10 @@ app.get('/', (req, res) => {
           else if (estado === 'DESCARTADO') badgeHTML = '<span class="bg-amber-500/10 text-amber-400 border border-amber-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full">🚫 DESCARTADO</span>';
           else badgeHTML = '<span class="bg-rose-500/10 text-rose-400 border border-rose-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full">❌ FALLO</span>';
 
+          const fechaTexto = item.creado_en 
+            ? new Date(item.creado_en).toLocaleString('es-ES') 
+            : 'Sin Fecha';
+
           return \`
             <div class="card-bg border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col justify-between space-y-3 hover:border-slate-700 transition">
               <div class="flex justify-between items-center text-[10px] font-mono text-slate-400 border-b border-slate-800/80 pb-2">
@@ -144,7 +164,7 @@ app.get('/', (req, res) => {
                 </div>
               </div>
               <div class="text-[10px] text-slate-500 font-mono text-right pt-1 border-t border-slate-800/50">
-                \${item.creado_en ? new Date(item.creado_en).toLocaleString('es-ES') : ''}
+                \${fechaTexto}
               </div>
             </div>
           \`;
