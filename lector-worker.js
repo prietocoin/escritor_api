@@ -20,34 +20,12 @@ const connection = new Redis({
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-const SYSTEM_PROMPT = `Eres un sistema quirúrgico experto en auditoría y extracción de datos financieros. Tu salida debe ser ÚNICAMENTE un objeto JSON válido, sin bloques de código (\`\`\`json) ni texto adicional.
+// Lee el prompt directamente del entorno
+const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT;
 
-PASO 1 - REGLA CERO (VALIDACIÓN CRÍTICA):
-Analiza visualmente la imagen. ¿Es un comprobante de pago, transferencia bancaria o recibo de exchange/billetera INDIVIDUAL y legible?
-- Si la imagen es una selfie, meme, paisaje, chat o es irreconocible -> ES INVÁLIDO.
-- Si la imagen es una TABLA, EXCEL, LISTA, o un HISTORIAL con múltiples movimientos -> ES INVÁLIDO.
-
-Si es INVÁLIDO, tu respuesta exacta debe ser:
-{
-  "valido": false,
-  "monto": null,
-  "moneda": null,
-  "banco": null,
-  "referencia": null,
-  "titular": null
+if (!SYSTEM_PROMPT) {
+  console.warn('[Lector Worker Warning] SYSTEM_PROMPT no está definido en las variables de entorno.');
 }
-
-PASO 2 - EXTRACCIÓN QUIRÚRGICA:
-Si la imagen APRUEBA la validación (es un comprobante válido), extrae los datos aplicando estas reglas estrictas:
-
-1. "monto": Extrae SOLO el valor numérico. Usa PUNTO (.) para decimales. PROHIBIDO usar separadores de miles o comas. (Ejemplo correcto: 20312.58).
-2. "moneda": Código ISO 4217 o ticker cripto en MAYÚSCULAS (Ej: USD, VES, COP, PEN, USDT).
-3. "banco": Nombre de la entidad, exchange o billetera (Ej: BINANCE, YAPE, BANCAMIGA, ZINLI). Prioriza el texto sobre el logo. TODO EN MAYÚSCULAS.
-4. "referencia": Número de operación, recibo o rastreo.
-5. "titular": Nombre del receptor, documento de identidad, Nickname, Pay ID o Binance ID. TODO EN MAYÚSCULAS.
-
-Si algún dato (2, 3, 4, 5) no existe en la imagen, asigna el valor null (sin comillas).`;
-
 const worker = new Worker('cola-analisis-ia', async (job) => {
   const { hash_largo, imageBase64, mimeType } = job.data;
   console.log(`[Lector Worker] Procesando IA para: ${hash_largo}`);
