@@ -1,12 +1,14 @@
 {
-  "name": "lector-visor",
+  "name": "lector-worker",
   "version": "1.0.0",
-  "main": "server.js",
+  "main": "lector-worker.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node lector-worker.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "@google/generative-ai": "^0.21.0",
+    "bullmq": "^5.81.5",
+    "ioredis": "^5.4.1",
     "pg": "^8.11.3"
   }
 }
