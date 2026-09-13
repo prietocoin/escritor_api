@@ -39,9 +39,9 @@ setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
 // ==========================================
 app.get('/api/comprobantes', async (req, res) => {
   try {
-    // Permite consultar por query params ?instancia=JAIRO o usa JAIRO por defecto
     const instanciaTarget = req.query.instancia || 'JAIRO';
 
+    // Búsqueda insensible a mayúsculas/minúsculas para evitar descalces
     const query = `
       SELECT 
         hash_largo,
@@ -56,7 +56,7 @@ app.get('/api/comprobantes', async (req, res) => {
         caption,
         instancia
       FROM registros_raw
-      WHERE instancia = $1
+      WHERE LOWER(instancia) = LOWER($1)
       ORDER BY timestamp_msg DESC
       LIMIT 60
     `;
@@ -114,7 +114,6 @@ app.get('/', (req, res) => {
   </div>
 
   <script>
-    // Lee la instancia desde los parámetros de la URL del navegador (?instancia=CLIENTE2)
     const urlParams = new URLSearchParams(window.location.search);
     const INSTANCIA = urlParams.get('instancia') || 'JAIRO';
     document.getElementById('lbl-instancia').innerText = INSTANCIA;
