@@ -3,12 +3,12 @@ const Redis = require('ioredis');
 const { Pool } = require('pg');
 const axios = require('axios');
 const FormData = require('form-data');
+const crypto = require('crypto'); // Generador de huella binaria única
 
 // 1. Configuración de Variables Globales
 const RAW_EVO_URL = process.env.EVOLUTION_URL || 'https://evo.jairokov.com';
 const EVOLUTION_URL = RAW_EVO_URL.replace(/\/$/, '');
 
-// Detecta automáticamente cualquier variante de nombre ingresada en EasyPanel
 const EVOLUTION_APIKEY = 
   process.env.EVOLUTION_APIKEY || 
   process.env.EVOLUTION_API_KEY || 
@@ -44,6 +44,7 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
   } = job.data;
 
   let urlR2 = null;
+  let hash_imagen = hash_largo; // Fallback por si no trae imagen
 
   // Procesamiento de Imagen (si aplica)
   if (es_imagen) {
@@ -72,6 +73,10 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
 
       if (typeof base64Data === 'string' && base64Data.length > 0) {
         const bufferImagen = Buffer.from(base64Data, 'base64');
+        
+        // Huella única basada en el contenido binario real de la foto
+        hash_imagen = crypto.createHash('md5').update(bufferImagen).digest('hex');
+
         const form = new FormData();
         form.append('file', bufferImagen, `${hash_corto}.jpg`);
 
@@ -94,14 +99,14 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
     }
   }
 
-  // 5. Inserción / Actualización en PostgreSQL (UPSERT)
+  // 5. Inserción / Actualización en PostgreSQL (UPSERT por hash_imagen)
   const queryUpsert = `
     INSERT INTO registros_raw (
       hash_corto, hash_largo, grupo_raw, usuario_raw, nombre_push,
-      caption, timestamp_msg, url_imagen, conteo, estado, instancia
+      caption, timestamp_msg, url_imagen, conteo, estado, instancia, hash_imagen
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 'PROCESADO', $9)
-    ON CONFLICT (hash_largo) DO UPDATE SET
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 'PROCESADO', $9, $10)
+    ON CONFLICT (hash_imagen) DO UPDATE SET
       conteo = registros_raw.conteo + 1,
       grupo_raw_2 = CASE WHEN registros_raw.grupo_raw <> EXCLUDED.grupo_raw THEN EXCLUDED.grupo_raw ELSE registros_raw.grupo_raw_2 END,
       usuario_raw_2 = CASE WHEN registros_raw.usuario_raw <> EXCLUDED.usuario_raw THEN EXCLUDED.usuario_raw ELSE registros_raw.usuario_raw_2 END,
@@ -121,11 +126,12 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
     caption, 
     timestamp_msg, 
     urlR2, 
-    instance || 'default'
+    instance || 'default',
+    hash_imagen
   ];
   const result = await pool.query(queryUpsert, values);
 
-  console.log(`[Worker DB OK] Procesado: ${hash_corto} | Es nuevo: ${result.rows[0].es_nuevo}`);
+  console.log(`[Worker DB OK] Procesado: ${hash_corto} | Conteo: ${result.rows[0].conteo} | Es nuevo: ${result.rows[0].es_nuevo}`);
   return result.rows[0];
 }, { connection });
 
