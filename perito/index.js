@@ -98,20 +98,31 @@ const worker = new Worker('cola-escritor-atom', async (job) => {
   const queryUpsert = `
     INSERT INTO registros_raw (
       hash_corto, hash_largo, grupo_raw, usuario_raw, nombre_push,
-      caption, timestamp_msg, url_imagen, conteo, estado
+      caption, timestamp_msg, url_imagen, conteo, estado, instancia
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 'PROCESADO')
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1, 'PROCESADO', $9)
     ON CONFLICT (hash_largo) DO UPDATE SET
       conteo = registros_raw.conteo + 1,
       grupo_raw_2 = CASE WHEN registros_raw.grupo_raw <> EXCLUDED.grupo_raw THEN EXCLUDED.grupo_raw ELSE registros_raw.grupo_raw_2 END,
       usuario_raw_2 = CASE WHEN registros_raw.usuario_raw <> EXCLUDED.usuario_raw THEN EXCLUDED.usuario_raw ELSE registros_raw.usuario_raw_2 END,
       url_imagen = COALESCE(EXCLUDED.url_imagen, registros_raw.url_imagen),
       timestamp_msg = EXCLUDED.timestamp_msg,
+      instancia = COALESCE(EXCLUDED.instancia, registros_raw.instancia),
       estado = 'PROCESADO'
     RETURNING (xmax = 0) AS es_nuevo, hash_corto, conteo;
   `;
 
-  const values = [hash_corto, hash_largo, grupo_raw, usuario_raw, nombre_push, caption, timestamp_msg, urlR2];
+  const values = [
+    hash_corto, 
+    hash_largo, 
+    grupo_raw, 
+    usuario_raw, 
+    nombre_push, 
+    caption, 
+    timestamp_msg, 
+    urlR2, 
+    instance || 'default'
+  ];
   const result = await pool.query(queryUpsert, values);
 
   console.log(`[Worker DB OK] Procesado: ${hash_corto} | Es nuevo: ${result.rows[0].es_nuevo}`);
