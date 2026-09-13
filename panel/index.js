@@ -35,13 +35,12 @@ async function ejecutarLimpieza48h() {
 setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
 
 // ==========================================
-// 2. API ENDPOINTS (Filtrado estricto por instancia)
+// 2. API ENDPOINTS (Lectura con conteo e historiales)
 // ==========================================
 app.get('/api/comprobantes', async (req, res) => {
   try {
     const instanciaTarget = req.query.instancia || 'JAIRO';
 
-    // Búsqueda insensible a mayúsculas/minúsculas para evitar descalces
     const query = `
       SELECT 
         hash_largo,
@@ -54,7 +53,8 @@ app.get('/api/comprobantes', async (req, res) => {
         grupo_raw,
         grupo_raw_2,
         caption,
-        instancia
+        instancia,
+        conteo
       FROM registros_raw
       WHERE LOWER(instancia) = LOWER($1)
       ORDER BY timestamp_msg DESC
@@ -79,7 +79,7 @@ app.delete('/api/comprobantes/:hash', async (req, res) => {
 });
 
 // ==========================================
-// 3. DASHBOARD WEB (Solo Imagen y Datos RAW)
+// 3. DASHBOARD WEB (Tarjeta agrupada con conteo 1x, 2x, etc.)
 // ==========================================
 app.get('/', (req, res) => {
   res.send(`
@@ -104,7 +104,7 @@ app.get('/', (req, res) => {
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-3 text-xs font-semibold">
-        <span class="bg-slate-800/80 px-3 py-1.5 rounded-full text-slate-300">Total Visualizados: <strong id="c-total" class="text-white">0</strong></span>
+        <span class="bg-slate-800/80 px-3 py-1.5 rounded-full text-slate-300">Total Hashes Únicos: <strong id="c-total" class="text-white">0</strong></span>
       </div>
     </div>
 
@@ -145,6 +145,7 @@ app.get('/', (req, res) => {
 
         const html = items.map(item => {
           const estado = item.estado || 'RECIBIDO';
+          const totalConteo = item.conteo || 1;
           
           let badgeColor = 'bg-slate-500/10 text-slate-400 border-slate-500/30';
           if (estado === 'PROCESADO') badgeColor = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
@@ -152,6 +153,7 @@ app.get('/', (req, res) => {
           if (estado === 'FALLO') badgeColor = 'bg-rose-500/10 text-rose-400 border-rose-500/30';
 
           const badgeHTML = \`<span class="\${badgeColor} border text-[10px] font-bold px-2 py-0.5 rounded-full">\${estado}</span>\`;
+          const conteoHTML = \`<span class="bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-[10px] font-black px-2 py-0.5 rounded-full">\${totalConteo}x</span>\`;
 
           let fechaTexto = 'Sin Fecha';
           if (item.timestamp_msg) {
@@ -167,45 +169,62 @@ app.get('/', (req, res) => {
             imgHTML = \`<img src="\${src}" class="w-full h-full object-cover cursor-pointer hover:scale-105 transition" onclick="window.open(this.src)" title="Click para expandir"/>\`;
           }
 
-          const remitenteNombre = item.nombre_push || 'Anónimo';
-          const usuarioID = item.usuario_raw_2 || item.usuario_raw || '';
-          const grupoID = item.grupo_raw_2 || item.grupo_raw || null;
+          // Remitentes detectados
+          const remitentes = [item.nombre_push || item.usuario_raw];
+          if (item.usuario_raw_2 && item.usuario_raw_2 !== item.usuario_raw) remitentes.push(item.usuario_raw_2);
+
+          // Grupos detectados
+          const grupos = [];
+          if (item.grupo_raw) grupos.push(item.grupo_raw);
+          if (item.grupo_raw_2 && item.grupo_raw_2 !== item.grupo_raw) grupos.push(item.grupo_raw_2);
 
           return \`
             <div class="card-bg border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col justify-between space-y-3 hover:border-slate-700 transition">
               
               <div class="flex justify-between items-center text-[10px] font-mono text-slate-400 border-b border-slate-800/80 pb-2">
                 <span title="\${item.hash_largo}">\${item.hash_largo ? item.hash_largo.substring(0, 16) : 'N/A'}...</span>
-                <div class="flex items-center gap-2">
+                <div class="flex items-center gap-1.5">
+                  \${conteoHTML}
                   \${badgeHTML}
-                  <button onclick="borrarRegistro('\${item.hash_largo}')" class="text-slate-500 hover:text-rose-400 transition p-1" title="Eliminar registro">🗑️</button>
+                  <button onclick="borrarRegistro('\${item.hash_largo}')" class="text-slate-500 hover:text-rose-400 transition p-1 ml-1" title="Eliminar registro">🗑️</button>
                 </div>
               </div>
 
               <div class="flex gap-3 items-start">
-                <div class="w-28 h-40 bg-slate-900 rounded-lg overflow-hidden border border-slate-800 flex-shrink-0">
+                <div class="w-28 h-44 bg-slate-900 rounded-lg overflow-hidden border border-slate-800 flex-shrink-0">
                   \${imgHTML}
                 </div>
                 
                 <div class="flex-1 space-y-2 text-xs overflow-hidden">
-                  <div class="flex justify-between items-center border-b border-slate-800/50 pb-1">
-                    <span class="text-slate-400">Remitente:</span>
-                    <span class="font-bold text-sky-400 truncate pl-2" title="\${usuarioID}">\${remitenteNombre}</span>
+                  
+                  <!-- Lista de Remitentes (1, 2...) -->
+                  <div class="border-b border-slate-800/50 pb-1.5">
+                    <span class="text-slate-400 text-[10px] block font-semibold mb-0.5">Remitente(s):</span>
+                    \${remitentes.map((r, i) => \`
+                      <div class="font-bold text-sky-400 truncate text-[11px]" title="\${r}">
+                        \${remitentes.length > 1 ? (i + 1) + '. ' : ''}\${r}
+                      </div>
+                    \`).join('')}
                   </div>
                   
-                  \${grupoID ? \`
-                    <div class="flex justify-between items-center border-b border-slate-800/50 pb-1">
-                      <span class="text-slate-400">Grupo:</span>
-                      <span class="text-slate-300 truncate pl-2" title="\${item.grupo_raw}">\${grupoID}</span>
-                    </div>
-                  \` : ''}
+                  <!-- Lista de Grupos/JIDs (1, 2...) -->
+                  <div class="border-b border-slate-800/50 pb-1.5">
+                    <span class="text-slate-400 text-[10px] block font-semibold mb-0.5">Grupo / JID:</span>
+                    \${grupos.length > 0 ? grupos.map((g, i) => \`
+                      <div class="text-slate-300 truncate font-mono text-[10px]" title="\${g}">
+                        \${grupos.length > 1 ? (i + 1) + '. ' : ''}\${g}
+                      </div>
+                    \`).join('') : '<span class="text-slate-600 text-[10px]">Directo (Sin grupo)</span>'}
+                  </div>
                   
-                  <div class="pt-1">
-                    <span class="text-slate-500 text-[10px] block mb-1">Texto (Caption):</span>
+                  <!-- Caption / Texto -->
+                  <div>
+                    <span class="text-slate-500 text-[10px] block mb-0.5 font-semibold">Texto (Caption):</span>
                     <div class="bg-slate-900 p-2 rounded text-slate-300 text-[11px] max-h-16 overflow-y-auto italic border border-slate-800">
                       \${item.caption ? item.caption : '<span class="text-slate-600">Sin texto...</span>'}
                     </div>
                   </div>
+
                 </div>
               </div>
 
