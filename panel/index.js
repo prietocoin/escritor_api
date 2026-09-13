@@ -35,11 +35,13 @@ async function ejecutarLimpieza48h() {
 setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
 
 // ==========================================
-// 2. API ENDPOINTS (Solo RAW)
+// 2. API ENDPOINTS (Filtrado estricto por instancia)
 // ==========================================
 app.get('/api/comprobantes', async (req, res) => {
   try {
-    // Consulta limpia, pura y dura solo a registros_raw
+    // Permite consultar por query params ?instancia=JAIRO o usa JAIRO por defecto
+    const instanciaTarget = req.query.instancia || 'JAIRO';
+
     const query = `
       SELECT 
         hash_largo,
@@ -51,19 +53,14 @@ app.get('/api/comprobantes', async (req, res) => {
         usuario_raw_2,
         grupo_raw,
         grupo_raw_2,
-        caption
+        caption,
+        instancia
       FROM registros_raw
-      WHERE (
-        usuario_raw ILIKE '%JAIRO%' 
-        OR usuario_raw_2 ILIKE '%JAIRO%' 
-        OR grupo_raw ILIKE '%JAIRO%' 
-        OR grupo_raw_2 ILIKE '%JAIRO%'
-        OR nombre_push ILIKE '%JAIRO%'
-      )
+      WHERE instancia = $1
       ORDER BY timestamp_msg DESC
       LIMIT 60
     `;
-    const { rows } = await pool.query(query);
+    const { rows } = await pool.query(query, [instanciaTarget]);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -91,7 +88,7 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Auditoría RAW - JAIRO</title>
+  <title>Auditoría RAW - Panel</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style> body { background-color: #0d131f; } .card-bg { background-color: #161f30; } </style>
 </head>
@@ -103,7 +100,7 @@ app.get('/', (req, res) => {
         <span class="text-2xl">📱</span>
         <div>
           <h1 class="text-xl font-bold text-white tracking-wide">Monitor RAW WhatsApp</h1>
-          <p class="text-xs text-slate-400">Instancia JAIRO - Solo imágenes y textos originales</p>
+          <p class="text-xs text-slate-400">Instancia: <span id="lbl-instancia" class="text-sky-400 font-bold">JAIRO</span> - Solo imágenes y textos originales</p>
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-3 text-xs font-semibold">
@@ -117,6 +114,11 @@ app.get('/', (req, res) => {
   </div>
 
   <script>
+    // Lee la instancia desde los parámetros de la URL del navegador (?instancia=CLIENTE2)
+    const urlParams = new URLSearchParams(window.location.search);
+    const INSTANCIA = urlParams.get('instancia') || 'JAIRO';
+    document.getElementById('lbl-instancia').innerText = INSTANCIA;
+
     async function borrarRegistro(hash) {
       if(!confirm('¿Deseas eliminar este registro?')) return;
       try {
@@ -127,7 +129,7 @@ app.get('/', (req, res) => {
 
     async function cargar() {
       try {
-        const res = await fetch('/api/comprobantes');
+        const res = await fetch('/api/comprobantes?instancia=' + encodeURIComponent(INSTANCIA));
         const items = await res.json();
 
         if (!Array.isArray(items)) {
@@ -138,7 +140,7 @@ app.get('/', (req, res) => {
         document.getElementById('c-total').innerText = items.length;
 
         if (items.length === 0) {
-          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay registros RAW recientes para JAIRO.</div>\`;
+          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay registros RAW recientes para \${INSTANCIA}.</div>\`;
           return;
         }
 
