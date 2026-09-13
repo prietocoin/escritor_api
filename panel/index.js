@@ -13,9 +13,7 @@ const app = express();
 app.use(express.json());
 const PORT = process.env.PORT || 3000;
 
-// ==========================================
-// 1. RUTINA LIMPIEZA (Solo RAW)
-// ==========================================
+// 1. RUTINA LIMPIEZA (48 horas)
 async function ejecutarLimpieza48h() {
   try {
     const resRaw = await pool.query(`
@@ -34,9 +32,24 @@ async function ejecutarLimpieza48h() {
 }
 setInterval(ejecutarLimpieza48h, 30 * 60 * 1000);
 
-// ==========================================
-// 2. API ENDPOINTS (Lectura con conteo e historiales)
-// ==========================================
+// 2. ENDPOINTS API
+
+// Obtener la lista de todas las instancias activas en la BD
+app.get('/api/instancias', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT LOWER(instancia) as instancia 
+      FROM registros_raw 
+      WHERE instancia IS NOT NULL AND instancia <> ''
+      ORDER BY instancia ASC
+    `);
+    res.json(rows.map(r => r.instancia));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Obtener comprobantes filtrados por instancia
 app.get('/api/comprobantes', async (req, res) => {
   try {
     const instanciaTarget = req.query.instancia || 'JAIRO';
@@ -44,6 +57,7 @@ app.get('/api/comprobantes', async (req, res) => {
     const query = `
       SELECT 
         hash_largo,
+        hash_imagen,
         estado,
         url_imagen,
         timestamp_msg,
@@ -67,20 +81,18 @@ app.get('/api/comprobantes', async (req, res) => {
   }
 });
 
-// Elimina únicamente de registros_raw
+// Eliminar un registro de registros_raw
 app.delete('/api/comprobantes/:hash', async (req, res) => {
   const { hash } = req.params;
   try {
-    await pool.query(`DELETE FROM registros_raw WHERE hash_largo = $1`, [hash]);
+    await pool.query(`DELETE FROM registros_raw WHERE hash_largo = $1 OR hash_imagen = $1`, [hash]);
     res.json({ success: true, hash });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ==========================================
-// 3. DASHBOARD WEB (Tarjeta agrupada con conteo 1x, 2x, etc.)
-// ==========================================
+// 3. DASHBOARD WEB CON SELECTOR DE INSTANCIAS
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -88,23 +100,35 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Auditoría RAW - Panel</title>
+  <title>Auditoría RAW - Multi-Instancia</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style> body { background-color: #0d131f; } .card-bg { background-color: #161f30; } </style>
 </head>
 <body class="text-slate-200 min-h-screen p-4 md:p-6 font-sans">
   <div class="max-w-7xl mx-auto space-y-6">
     
+    <!-- BARRA SUPERIOR CON SELECTOR -->
     <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-800 pb-4">
-      <div class="flex items-center gap-2">
-        <span class="text-2xl">📱</span>
+      <div class="flex items-center gap-3">
+        <span class="text-3xl">📱</span>
         <div>
           <h1 class="text-xl font-bold text-white tracking-wide">Monitor RAW WhatsApp</h1>
-          <p class="text-xs text-slate-400">Instancia: <span id="lbl-instancia" class="text-sky-400 font-bold">JAIRO</span> - Solo imágenes y textos originales</p>
+          <p class="text-xs text-slate-400">Filtrado inteligente por cliente / instancia</p>
         </div>
       </div>
-      <div class="flex flex-wrap items-center gap-3 text-xs font-semibold">
-        <span class="bg-slate-800/80 px-3 py-1.5 rounded-full text-slate-300">Total Hashes Únicos: <strong id="c-total" class="text-white">0</strong></span>
+
+      <div class="flex flex-wrap items-center gap-3">
+        <!-- SELECTOR DE INSTANCIAS -->
+        <div class="flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5">
+          <label for="select-instancia" class="text-xs font-semibold text-slate-400">Instancia:</label>
+          <select id="select-instancia" onchange="cambiarInstancia(this.value)" class="bg-transparent text-sky-400 font-bold text-sm focus:outline-none cursor-pointer">
+            <option value="JAIRO" class="bg-slate-900 text-white">JAIRO</option>
+          </select>
+        </div>
+
+        <span class="bg-slate-800/80 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-300 border border-slate-700">
+          Hashes Únicos: <strong id="c-total" class="text-white">0</strong>
+        </span>
       </div>
     </div>
 
@@ -115,8 +139,34 @@ app.get('/', (req, res) => {
 
   <script>
     const urlParams = new URLSearchParams(window.location.search);
-    const INSTANCIA = urlParams.get('instancia') || 'JAIRO';
-    document.getElementById('lbl-instancia').innerText = INSTANCIA;
+    let INSTANCIA_ACTUAL = urlParams.get('instancia') || 'JAIRO';
+
+    // Cargar selector dinámico de instancias desde la BD
+    async function cargarInstancias() {
+      try {
+        const res = await fetch('/api/instancias');
+        const lista = await res.json();
+        
+        if (Array.isArray(lista) && lista.length > 0) {
+          const select = document.getElementById('select-instancia');
+          
+          // Asegurar que la instancia actual esté en la lista
+          const setInstancias = new Set([...lista, INSTANCIA_ACTUAL.toLowerCase()]);
+          
+          select.innerHTML = Array.from(setInstancias).map(inst => {
+            const nombre = inst.toUpperCase();
+            const selected = inst.toLowerCase() === INSTANCIA_ACTUAL.toLowerCase() ? 'selected' : '';
+            return \`<option value="\${nombre}" \${selected} class="bg-slate-900 text-white">\${nombre}</option>\`;
+          }).join('');
+        }
+      } catch (e) { console.error('Error cargando instancias:', e); }
+    }
+
+    function cambiarInstancia(nuevaInstancia) {
+      INSTANCIA_ACTUAL = nuevaInstancia;
+      window.history.pushState({}, '', '?instancia=' + encodeURIComponent(nuevaInstancia));
+      cargar();
+    }
 
     async function borrarRegistro(hash) {
       if(!confirm('¿Deseas eliminar este registro?')) return;
@@ -128,7 +178,7 @@ app.get('/', (req, res) => {
 
     async function cargar() {
       try {
-        const res = await fetch('/api/comprobantes?instancia=' + encodeURIComponent(INSTANCIA));
+        const res = await fetch('/api/comprobantes?instancia=' + encodeURIComponent(INSTANCIA_ACTUAL));
         const items = await res.json();
 
         if (!Array.isArray(items)) {
@@ -139,7 +189,7 @@ app.get('/', (req, res) => {
         document.getElementById('c-total').innerText = items.length;
 
         if (items.length === 0) {
-          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay registros RAW recientes para \${INSTANCIA}.</div>\`;
+          document.getElementById('grid-container').innerHTML = \`<div class="col-span-full text-center py-12 text-slate-500">No hay registros RAW recientes para \${INSTANCIA_ACTUAL.toUpperCase()}.</div>\`;
           return;
         }
 
@@ -169,14 +219,14 @@ app.get('/', (req, res) => {
             imgHTML = \`<img src="\${src}" class="w-full h-full object-cover cursor-pointer hover:scale-105 transition" onclick="window.open(this.src)" title="Click para expandir"/>\`;
           }
 
-          // Remitentes detectados
           const remitentes = [item.nombre_push || item.usuario_raw];
           if (item.usuario_raw_2 && item.usuario_raw_2 !== item.usuario_raw) remitentes.push(item.usuario_raw_2);
 
-          // Grupos detectados
           const grupos = [];
           if (item.grupo_raw) grupos.push(item.grupo_raw);
           if (item.grupo_raw_2 && item.grupo_raw_2 !== item.grupo_raw) grupos.push(item.grupo_raw_2);
+
+          const idBorrado = item.hash_imagen || item.hash_largo;
 
           return \`
             <div class="card-bg border border-slate-800 rounded-xl p-4 shadow-lg flex flex-col justify-between space-y-3 hover:border-slate-700 transition">
@@ -186,7 +236,7 @@ app.get('/', (req, res) => {
                 <div class="flex items-center gap-1.5">
                   \${conteoHTML}
                   \${badgeHTML}
-                  <button onclick="borrarRegistro('\${item.hash_largo}')" class="text-slate-500 hover:text-rose-400 transition p-1 ml-1" title="Eliminar registro">🗑️</button>
+                  <button onclick="borrarRegistro('\${idBorrado}')" class="text-slate-500 hover:text-rose-400 transition p-1 ml-1" title="Eliminar registro">🗑️</button>
                 </div>
               </div>
 
@@ -197,7 +247,6 @@ app.get('/', (req, res) => {
                 
                 <div class="flex-1 space-y-2 text-xs overflow-hidden">
                   
-                  <!-- Lista de Remitentes (1, 2...) -->
                   <div class="border-b border-slate-800/50 pb-1.5">
                     <span class="text-slate-400 text-[10px] block font-semibold mb-0.5">Remitente(s):</span>
                     \${remitentes.map((r, i) => \`
@@ -207,7 +256,6 @@ app.get('/', (req, res) => {
                     \`).join('')}
                   </div>
                   
-                  <!-- Lista de Grupos/JIDs (1, 2...) -->
                   <div class="border-b border-slate-800/50 pb-1.5">
                     <span class="text-slate-400 text-[10px] block font-semibold mb-0.5">Grupo / JID:</span>
                     \${grupos.length > 0 ? grupos.map((g, i) => \`
@@ -217,7 +265,6 @@ app.get('/', (req, res) => {
                     \`).join('') : '<span class="text-slate-600 text-[10px]">Directo (Sin grupo)</span>'}
                   </div>
                   
-                  <!-- Caption / Texto -->
                   <div>
                     <span class="text-slate-500 text-[10px] block mb-0.5 font-semibold">Texto (Caption):</span>
                     <div class="bg-slate-900 p-2 rounded text-slate-300 text-[11px] max-h-16 overflow-y-auto italic border border-slate-800">
@@ -239,6 +286,7 @@ app.get('/', (req, res) => {
       } catch(e) { console.error(e); }
     }
 
+    cargarInstancias();
     cargar();
     setInterval(cargar, 5000);
   </script>
